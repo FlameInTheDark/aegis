@@ -118,9 +118,11 @@ func run() error {
 		Changes: pg.NewChangeRepo(db), Assets: pg.NewAssetRepo(db), Bus: bus, Log: log,
 		AllowPublicScope: cfg.Scanner.AllowPublicScope,
 	}
+	vulnRepo := pg.NewVulnRepo(db)
 	reportsSvc := &reports.Service{
 		Reports: pg.NewReportRepo(db), Findings: pg.NewFindingRepo(db), Assets: pg.NewAssetRepo(db), Details: pg.NewReportDetailRepo(db),
-		Sites: pg.NewSiteRepo(db), Orgs: pg.NewOrgRepo(db), Services: pg.NewServiceRepo(db), Scans: pg.NewScanRepo(db), Store: store, Log: log,
+		Sites: pg.NewSiteRepo(db), Orgs: pg.NewOrgRepo(db), Services: pg.NewServiceRepo(db), Scans: pg.NewScanRepo(db),
+		Vulns: vulnRepo, Store: store, Log: log,
 	}
 	agentTasks := pg.NewAgentTaskRepo(db)
 	agentsRepo := pg.NewAgentRepo(db)

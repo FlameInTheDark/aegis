@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/Masterminds/squirrel"
@@ -274,4 +275,37 @@ func (r *WebhookRepo) MarkFired(ctx context.Context, id string) error {
 		Where(squirrel.Eq{"id": id})
 	_, err := r.db.Exec(ctx, q)
 	return err
+}
+
+func (r *WebhookRepo) ByID(ctx context.Context, orgID, id string) (*domain.WebhookConfig, error) {
+	q := r.db.Select("id, organization_id, name, url, events, enabled, last_fired, created_at").
+		From("webhook_configs").Where(squirrel.Eq{"id": id, "organization_id": orgID})
+	var w domain.WebhookConfig
+	if err := r.db.QueryRow(ctx, q).Scan(&w.ID, &w.OrgID, &w.Name, &w.URL, &w.Events, &w.Enabled, &w.LastFired, &w.CreatedAt); err != nil {
+		return nil, mapNotFound(err)
+	}
+	return &w, nil
+}
+
+func (r *WebhookRepo) Update(ctx context.Context, orgID string, w *domain.WebhookConfig) error {
+	q := r.db.Update("webhook_configs").
+		Set("name", w.Name).
+		Set("url", w.URL).
+		Set("events", w.Events).
+		Set("enabled", w.Enabled).
+		Where(squirrel.Eq{"id": w.ID, "organization_id": orgID})
+	_, err := r.db.Exec(ctx, q)
+	return err
+}
+
+func (r *WebhookRepo) Delete(ctx context.Context, orgID, id string) error {
+	q := r.db.Delete("webhook_configs").Where(squirrel.Eq{"id": id, "organization_id": orgID})
+	res, err := r.db.Exec(ctx, q)
+	if err != nil {
+		return err
+	}
+	if rows, _ := res.RowsAffected(); rows == 0 {
+		return mapNotFound(fmt.Errorf("webhook not found"))
+	}
+	return nil
 }

@@ -157,8 +157,9 @@ func register(ctx context.Context, cfg *config.Config, db *pg.DB, engVersion str
 	if name == "" {
 		name = "scanner-" + hostnameOrLocal()
 	}
-	// Reuse an existing registration with the same name at the site.
-	existing, err := repo.List(ctx, cfg.Scanner.SiteID)
+	orgID := orgForSite(ctx, db, cfg.Scanner.SiteID)
+	// Reuse an existing registration with the same name in the org.
+	existing, err := repo.List(ctx, orgID)
 	if err == nil {
 		for _, s := range existing {
 			if s.Name == name && s.SiteID == cfg.Scanner.SiteID {
@@ -168,7 +169,7 @@ func register(ctx context.Context, cfg *config.Config, db *pg.DB, engVersion str
 	}
 	// scanners.id is a UUID primary key — the display name never goes there.
 	sc := &domain.Scanner{
-		ID: ids.New(), OrganizationID: orgForSite(ctx, db, cfg.Scanner.SiteID), SiteID: cfg.Scanner.SiteID, Name: name,
+		ID: ids.New(), OrganizationID: orgID, SiteID: cfg.Scanner.SiteID, Name: name,
 		Version: scannerVersion + "/" + engVersion, Capabilities: cfg.Scanner.Capabilities,
 		Interfaces: ifaces, Health: "healthy", LastSeen: time.Now().UTC(),
 	}

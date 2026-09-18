@@ -4,7 +4,7 @@ import { api } from '@/lib/api'
 import type { MetricsSummary, Page, Finding, DetectionMatch, Asset } from '@/types'
 import { KPICard, Panel, PanelHeader, SeverityBadge, Spinner, ErrorState, StatusDot } from '@/components/ui'
 import { TimeSeriesChart, SeverityDonut } from '@/components/charts/Chart'
-import { relTime, humanize, fmtNum } from '@/lib/format'
+import { relTime, fmtNum } from '@/lib/format'
 
 export default function DashboardPage() {
   const summary = useQuery({
@@ -115,7 +115,7 @@ export default function DashboardPage() {
       <Panel>
         <PanelHeader title="Coverage notes" />
         <p className="px-3.5 py-3 text-[12.5px] text-fg-dim">
-          Metrics reflect only scanned scopes and ingested telemetry. {humanize('')}A lack of findings does not imply security — check site coverage
+          Metrics reflect only scanned scopes and ingested telemetry. A lack of findings does not imply security — check site coverage
           and sensor visibility in Settings before drawing conclusions.
         </p>
       </Panel>

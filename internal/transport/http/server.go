@@ -259,9 +259,11 @@ func (a *App) registerRoutes() {
         g.Get("/reports/jobs/:id", a.handleGetReportJob)
         g.Get("/reports/jobs/:id/download", a.handleDownloadReport)
 
-        // Webhooks (alerting §170).
-        g.Get("/webhooks", a.handleListWebhooks)
-        g.Post("/webhooks", a.handleCreateWebhook)
+		// Webhooks (alerting §170).
+		g.Get("/webhooks", a.handleListWebhooks)
+		g.Post("/webhooks", a.handleCreateWebhook)
+		g.Patch("/webhooks/:id", a.handleUpdateWebhook)
+		g.Delete("/webhooks/:id", a.handleDeleteWebhook)
 
         // Search, metrics, audit.
         g.Get("/search", a.handleSearch)

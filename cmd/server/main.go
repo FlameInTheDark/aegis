@@ -164,7 +164,8 @@ func run() error {
 	ingestor := &telemetry.Ingestor{Bus: bus, CH: chDB, Engine: detectEngine, Cache: rdb, Log: log, BatchSize: 500}
 	reportsSvc := &reports.Service{
 		Reports: pg.NewReportRepo(db), Findings: pg.NewFindingRepo(db), Assets: assetsRepo, Details: pg.NewReportDetailRepo(db),
-		Sites: pg.NewSiteRepo(db), Orgs: pg.NewOrgRepo(db), Services: pg.NewServiceRepo(db), Scans: pg.NewScanRepo(db), Store: store, Log: log,
+		Sites: pg.NewSiteRepo(db), Orgs: pg.NewOrgRepo(db), Services: pg.NewServiceRepo(db), Scans: pg.NewScanRepo(db),
+		Vulns: vulnRepo, Store: store, Log: log,
 	}
 
 	// --- bootstrap (first run, §160)

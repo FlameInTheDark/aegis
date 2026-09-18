@@ -30,6 +30,7 @@ type Service struct {
 	Orgs     *pg.OrgRepo
 	Services *pg.ServiceRepo
 	Scans    *pg.ScanRepo
+	Vulns    *pg.VulnRepo
 	Store    *platform.ObjectStore
 	Log      *slog.Logger
 	Details  DetailSource
@@ -215,9 +216,14 @@ func (s *Service) gather(ctx context.Context, orgID string, def *domain.ReportDe
 }
 
 func isKEV(ctx context.Context, s *Service, cve string) bool {
-	// Cheap check via the findings' vuln linkage is avoided here; the
-	// executive summary uses the KEV set cached by the feed worker.
-	return false
+	if cve == "" || s.Vulns == nil {
+		return false
+	}
+	kevSet, err := s.Vulns.KEVSet(ctx)
+	if err != nil {
+		return false
+	}
+	return kevSet[cve]
 }
 
 func titleFor(def *domain.ReportDefinition) string {

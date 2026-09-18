@@ -288,4 +288,46 @@ func (a *App) handleCreateWebhook(c *fiber.Ctx) error {
 	return c.Status(201).JSON(w)
 }
 
+func (a *App) handleUpdateWebhook(c *fiber.Ctx) error {
+	claims := a.claimsFrom(c)
+	if he := a.requirePerm(c, domain.PermSettingsManage); he != nil {
+		return he
+	}
+	existing, err := a.svc.Webhooks.ByID(Context(c), claims.OrganizationID, c.Params("id"))
+	if err != nil || existing == nil {
+		return NotFound("webhook not found")
+	}
+	var w domain.WebhookConfig
+	if err := c.BodyParser(&w); err != nil {
+		return BadRequest("invalid JSON body")
+	}
+	if w.URL != "" {
+		existing.URL = w.URL
+	}
+	if w.Name != "" {
+		existing.Name = w.Name
+	}
+	if w.Events != nil {
+		existing.Events = w.Events
+	}
+	if w.Enabled != existing.Enabled || c.Body() != nil {
+		existing.Enabled = w.Enabled
+	}
+	if err := a.svc.Webhooks.Update(Context(c), claims.OrganizationID, existing); err != nil {
+		return Internal("webhook update failed")
+	}
+	return c.JSON(existing)
+}
+
+func (a *App) handleDeleteWebhook(c *fiber.Ctx) error {
+	claims := a.claimsFrom(c)
+	if he := a.requirePerm(c, domain.PermSettingsManage); he != nil {
+		return he
+	}
+	if err := a.svc.Webhooks.Delete(Context(c), claims.OrganizationID, c.Params("id")); err != nil {
+		return NotFound("webhook not found")
+	}
+	return c.SendStatus(204)
+}
+
 var _ = pg.Page{}

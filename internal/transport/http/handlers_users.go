@@ -17,8 +17,8 @@ import (
 
 // passwordPolicy is the shared password rule for creation and changes.
 func passwordPolicy(p string) error {
-	if len(p) < 10 {
-		return fiber.NewError(fiber.StatusBadRequest, "password must be at least 10 characters")
+	if len(p) < 12 {
+		return fiber.NewError(fiber.StatusBadRequest, "password must be at least 12 characters")
 	}
 	if len(p) > 128 {
 		return fiber.NewError(fiber.StatusBadRequest, "password too long")

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/FlameInTheDark/aegis/internal/assets"
@@ -42,6 +43,11 @@ type Orchestrator struct {
 	AllowPublicScope bool
 	// Hub optionally routes scans to remote gRPC scanner agents.
 	Hub ScannerHub
+	// scanStats accumulates per-scan observation counters in memory and
+	// flushes them to the database periodically. The map is keyed by
+	// scan ID; access is serialized through mu.
+	mu        sync.Mutex
+	scanStats map[string]*domain.ScanStats
 }
 
 // ScannerHub routes scans to remote gRPC agents (implemented by hub.Hub).
@@ -252,7 +258,7 @@ func (o *Orchestrator) ApplyObservation(ctx context.Context, obs *domain.Observa
 		}
 		_, err = o.Inventory.RecordService(ctx, obs.OrganizationID, obs.SiteID, obs.ScanID, a.ID, svc)
 		if err == nil {
-			o.bumpStats(obs.ScanID, func(st *domain.ScanStats) { st.PortsDiscovered++ })
+			o.bumpStats(ctx, obs.ScanID, func(st *domain.ScanStats) { st.PortsDiscovered++ })
 		}
 		return err
 	case "service":
@@ -294,7 +300,7 @@ func (o *Orchestrator) ApplyObservation(ctx context.Context, obs *domain.Observa
 		}
 		_, err = o.Inventory.RecordService(ctx, obs.OrganizationID, obs.SiteID, obs.ScanID, a.ID, svc)
 		if err == nil {
-			o.bumpStats(obs.ScanID, func(st *domain.ScanStats) { st.ServicesFingerprinted++ })
+			o.bumpStats(ctx, obs.ScanID, func(st *domain.ScanStats) { st.ServicesFingerprinted++ })
 		}
 		// Service-level OS hints (nmap service table, HTTP server headers):
 		// far weaker than -O fingerprints but available without raw sockets.
@@ -338,7 +344,7 @@ func (o *Orchestrator) ApplyObservation(ctx context.Context, obs *domain.Observa
 		}
 		return err
 	case "host_down":
-		o.bumpStats(obs.ScanID, func(st *domain.ScanStats) { st.Unreachable++ })
+		o.bumpStats(ctx, obs.ScanID, func(st *domain.ScanStats) { st.Unreachable++ })
 	case "topology":
 		return o.applyTopologyObservation(ctx, obs)
 	case "os":
@@ -775,11 +781,22 @@ func parseCronDaily(f []string) (int, int, bool) {
 	return m, h, true
 }
 
-func (o *Orchestrator) bumpStats(scanID string, fn func(*domain.ScanStats)) {
-	// Per-observation counters are folded into scan stats by the scanner
-	// process at task completion via RefreshProgress/UpdateStats.
-	_ = scanID
-	_ = fn
+func (o *Orchestrator) bumpStats(ctx context.Context, scanID string, fn func(*domain.ScanStats)) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.scanStats == nil {
+		o.scanStats = make(map[string]*domain.ScanStats)
+	}
+	st, ok := o.scanStats[scanID]
+	if !ok {
+		st = &domain.ScanStats{}
+		o.scanStats[scanID] = st
+	}
+	fn(st)
+	// Flush to the database so the UI sees live counters. Errors are
+	// non-fatal — the stats are best-effort and RefreshProgress will
+	// still set task-level counters at completion.
+	_ = o.Scans.UpdateStats(ctx, scanID, *st)
 }
 
 func truncate(s string, n int) string {
