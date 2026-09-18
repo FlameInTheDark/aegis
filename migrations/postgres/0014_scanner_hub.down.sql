@@ -1,0 +1,3 @@
+ALTER TABLE scanners DROP COLUMN IF EXISTS is_default;
+ALTER TABLE scanners DROP COLUMN IF EXISTS transport;
+ALTER TABLE scanners DROP COLUMN IF EXISTS token_hash;

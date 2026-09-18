@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aegis.fullname" . }}-frontend
+  labels: {{- include "aegis.labels" . | nindent 4 }}
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: aegis-frontend } }
+  template:
+    metadata: { labels: { app: aegis-frontend } }
+    spec:
+      securityContext: { runAsNonRoot: true, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: frontend
+          image: {{ include "aegis.image" (merge . (dict "image" "aegis-frontend")) }}
+          ports: [ { containerPort: 80 } ]
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "aegis.fullname" . }}-frontend
+spec:
+  selector: { app: aegis-frontend }
+  ports: [ { port: 80, targetPort: 80 } ]

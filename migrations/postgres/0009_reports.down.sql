@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS report_jobs;
+DROP TABLE IF EXISTS reports;

@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: aegis-frontend, namespace: aegis, labels: { app: aegis-frontend } }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: aegis-frontend } }
+  template:
+    metadata: { labels: { app: aegis-frontend } }
+    spec:
+      containers:
+        - name: frontend
+          image: ghcr.io/aegis-platform/aegis-frontend:latest
+          ports: [ { containerPort: 80 } ]
+          resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { cpu: 200m, memory: 128Mi } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: aegis-frontend, namespace: aegis }
+spec:
+  selector: { app: aegis-frontend }
+  ports: [ { port: 80, targetPort: 80 } ]
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aegis
+  namespace: aegis
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: 10m
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: aegis.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend: { service: { name: aegis-server, port: { number: 8080 } } }
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: aegis-frontend, port: { number: 80 } } }

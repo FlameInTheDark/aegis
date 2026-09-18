@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aegis.fullname" . }}-server
+  labels: {{- include "aegis.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas.server }}
+  selector: { matchLabels: { app: aegis-server } }
+  template:
+    metadata:
+      labels: { app: aegis-server }
+      annotations: { prometheus.io/scrape: "true", prometheus.io/port: "9091" }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: server
+          image: {{ include "aegis.image" (merge . (dict "image" "aegis-server")) }}
+          ports: [ { containerPort: 8080, name: http }, { containerPort: 9090, name: grpc } ]
+          env: {{- include "aegis.env" . | nindent 12 }}
+          readinessProbe: { httpGet: { path: /readyz, port: 8080 }, initialDelaySeconds: 5 }
+          livenessProbe: { httpGet: { path: /healthz, port: 8080 }, initialDelaySeconds: 10 }
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "aegis.fullname" . }}-server
+  labels: {{- include "aegis.labels" . | nindent 4 }}
+spec:
+  selector: { app: aegis-server }
+  ports:
+    - { name: http, port: 8080, targetPort: 8080 }
+    - { name: grpc, port: 9090, targetPort: 9090 }

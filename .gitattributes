@@ -1,0 +1,8 @@
+# Release packaging: `git archive` (scripts/package-release.sh) never ships
+# these — they are sandbox/dev artifacts that were committed for workspace
+# continuity, not for users of the platform.
+skills/ export-ignore
+scripts/sandbox-infra/bin/ export-ignore
+download/ export-ignore
+upload/ export-ignore
+tool-results/ export-ignore

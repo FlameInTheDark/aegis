@@ -1,0 +1,2 @@
+{"_path":"dns","ts":"2026-09-14T18:31:00.000000Z","uid":"Cdemo04","id.orig_h":"192.168.10.55","id.orig_p":53001,"id.resp_h":"10.20.0.53","id.resp_p":53,"proto":"udp","trans_id":101,"query":"updates.demo.internal","qtype_name":"A","rcode_name":"NOERROR","answers":["10.20.0.10"],"rejected":false}
+{"_path":"dns","ts":"2026-09-14T18:31:05.000000Z","uid":"Cdemo05","id.orig_h":"192.168.10.140","id.orig_p":53002,"id.resp_h":"10.20.0.53","id.resp_p":53,"proto":"udp","trans_id":102,"query":"nx.demo.internal","qtype_name":"AAAA","rcode_name":"NXDOMAIN","rejected":false}

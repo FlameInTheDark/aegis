@@ -1,0 +1,44 @@
+# Distributed scanner.
+#
+# Capability model (least privilege, spec §89):
+#   - The container runs with a single capability, CAP_NET_RAW, via the
+#     deployment (compose: cap_drop [ALL] + cap_add [NET_RAW]; k8s:
+#     drop [ALL] / add [NET_RAW]). Raw packet access is what nmap needs
+#     for SYN scans, OS fingerprinting and ICMP/UDP traceroute probes.
+#   - File capabilities (setcap cap_net_raw+ep) are additionally stamped
+#     onto the nmap/traceroute binaries so the stack also works if the
+#     image is run as a non-root user (docker run --user 10001 …) — as
+#     long as the bounding set keeps NET_RAW, file caps make the binary
+#     self-sufficient.
+#   - traceroute (TCP/UDP/ICMP probe methods), tracepath (UDP fallback,
+#     no raw sockets needed) and iproute2 (`ip route` diagnostics) are
+#     installed so network-path debugging works inside the container the
+#     same way the scanner engine probes it. `verify-traceroute` checks
+#     all of it live.
+# syntax=docker/dockerfile:1
+FROM golang:1.27-alpine AS build
+WORKDIR /src
+RUN apk add --no-cache git ca-certificates
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd/ cmd/
+COPY internal/ internal/
+COPY api/ api/
+COPY migrations/ migrations/
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/aegis-scanner ./cmd/scanner
+
+FROM alpine:3.20
+# traceroute lives in the community repo (enabled in the alpine image by
+# default); iputils-tracepath/libcap/iproute2 are in main.
+RUN apk add --no-cache ca-certificates nmap nmap-scripts libcap traceroute iputils-tracepath iproute2 \
+    && addgroup -g 10001 aegis && adduser -u 10001 -G aegis -D -H aegis \
+    && setcap cap_net_raw+ep /usr/bin/nmap \
+    && setcap cap_net_raw+ep /usr/bin/traceroute
+# NOTE: the image keeps root as the default user ON PURPOSE: compose/k8s
+# scope the container to a single capability (NET_RAW) via cap_drop/cap_add,
+# which is the least-privilege that keeps nmap -sS/-O and ICMP probes
+# functional. Going fully non-root additionally works thanks to the file
+# caps above: `docker run --user 10001 ...` (see deploy/compose README).
+COPY --from=build /out/aegis-scanner /usr/local/bin/aegis-scanner
+COPY --chmod=0755 deploy/docker/verify-traceroute.sh /usr/local/bin/verify-traceroute
+ENTRYPOINT ["aegis-scanner"]

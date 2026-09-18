@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: aegis-config, namespace: aegis }
+data:
+  AEGIS_ENV: production
+  AEGIS_LOG_LEVEL: info
+  AEGIS_REDIS_URL: redis://redis.aegis.svc:6379/0
+  AEGIS_NATS_URL: nats://nats.aegis.svc:4222
+  AEGIS_CLICKHOUSE_URL: clickhouse://clickhouse.aegis.svc:9000
+  AEGIS_S3_ENDPOINT: http://rustfs.aegis.svc:9000
+  AEGIS_S3_BUCKET: aegis

@@ -1,0 +1,65 @@
+# ==============================================================================
+# Aegis Security Platform — scanner configuration reference
+# ==============================================================================
+#
+# The scanner is the distributed packet-pushing component. Deploy ONE PER
+# SITE / VLAN segment, close to the targets it is authorized to assess.
+# It receives tasks over NATS (security.scan.task.v1) and streams
+# observations back (security.scan.result.v1).
+#
+# SAFETY CONTRACT (docs/SCANNER.md):
+#   * nmap needs CAP_NET_RAW; the scanner container/binary gets that single
+#     capability and nothing else.
+#   * Every scope is validated before a single packet is sent: normalization,
+#     denylist/exclusions, size ceiling (262,144 addresses), private-range
+#     enforcement unless public scanning is explicitly enabled.
+#   * Profiles cap what a scan may request regardless of what the user asks.
+#
+# Precedence: environment variables ALWAYS override this file.
+# ==============================================================================
+
+env: production                    # AEGIS_ENV
+log:
+  level: info                      # AEGIS_LOG_LEVEL
+  format: json                     # AEGIS_LOG_FORMAT
+
+metrics:
+  addr: ":9091"                    # AEGIS_METRICS_ADDR
+
+# --- Data layer (scanner reads scan tasks + writes observations) ----------------
+database_url: postgres://aegis:aegis@localhost:5432/aegis?sslmode=require   # DATABASE_URL
+redis_url: redis://localhost:6379/0                                        # REDIS_URL
+nats_url: nats://localhost:4222                                            # NATS_URL
+
+# --- Registration ---------------------------------------------------------------
+# Static registration of this scanner node. The site must exist first (create
+# it in the UI/API, then paste its UUID). If empty, the scanner registers as
+# unassigned and an administrator binds it to a site.
+name: scanner-01                   # AEGIS_SCANNER_NAME
+site_id: ""                        # AEGIS_SCANNER_SITE_ID  (site UUID)
+capabilities:                      # AEGIS_SCANNER_CAPABILITIES (comma list)
+  - ipv4
+  - ipv6
+  - tcp_connect
+  - service_detection
+  - os_guess
+
+# --- Scan engines ----------------------------------------------------------------
+engines:
+  nmap_path: /usr/bin/nmap         # AEGIS_NMAP_PATH
+  zgrab_path: /usr/local/bin/zgrab2 # AEGIS_ZGRAB_PATH  (optional; inventory profile)
+  nuclei_path: /usr/local/bin/nuclei # AEGIS_NUCLEI_PATH (optional; active_validation)
+  masscan_path: ""                 # AEGIS_MASSCAN_PATH (optional)
+
+# --- Safety limits (hard ceilings enforced before and during scans) ---------------
+limits:
+  max_concurrency: 4               # AEGIS_SCAN_MAX_CONCURRENCY  parallel tasks
+  max_targets: 65536               # AEGIS_SCAN_MAX_TARGETS      address expansion cap
+  max_packet_rate: 500             # AEGIS_SCAN_MAX_PACKET_RATE  packets/second
+  max_runtime: 4h                  # AEGIS_SCAN_MAX_RUNTIME      per-scan wall clock
+  # Public-scope scanning is REFUSED unless this is explicitly true.
+  # Keep false. If you must scan routable space you are authorized for, flip it
+  # per-node, document it, and keep the denylist tight.
+  allow_public_scopes: false       # AEGIS_SCAN_ALLOW_PUBLIC_SCOPES
+
+demo_mode: false                   # AEGIS_DEMO_MODE

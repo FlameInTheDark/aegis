@@ -1,0 +1,13 @@
+{
+  "status": "OK",
+  "status-code": 200,
+  "version": "1.0",
+  "access": "public",
+  "total": 3,
+  "offset": 0,
+  "data": [
+    { "cve": "CVE-2026-1001", "epss": "0.9123", "percentile": "0.9910", "date": "2026-09-14" },
+    { "cve": "CVE-2026-1002", "epss": "0.0412", "percentile": "0.6420", "date": "2026-09-14" },
+    { "cve": "CVE-2026-1003", "epss": "0.0009", "percentile": "0.1230", "date": "2026-09-14" }
+  ]
+}

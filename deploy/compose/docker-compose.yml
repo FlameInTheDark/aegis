@@ -1,0 +1,266 @@
+# Aegis Security Platform — local/small deployment (spec §87/§158 LOCAL).
+# First boot: the server bootstraps the schema, seeds builtin detection
+# rules and, with AEGIS_BOOTSTRAP_ADMIN_*, the initial owner account.
+#
+#   docker compose -f deploy/compose/docker-compose.yml up -d
+#   open http://localhost:3000  (admin@aegis.local / aegis-demo-admin-2026)
+#
+# The data layer also publishes 127.0.0.1 host ports for the hybrid dev
+# workflow (native binaries via ./scripts/dev.sh): 5432 postgres, 6379
+# redis, 4222 nats, 9000 clickhouse-native, 9001 rustfs-api (host 9000 is
+# taken by ClickHouse), 9002 rustfs-console.
+#
+# ClickHouse credentials MUST be set (CLICKHOUSE_USER/PASSWORD): the image
+# otherwise confines its default user to 127.0.0.1 inside the container and
+# host-side clients fail with a misleading 516 "Authentication failed".
+#
+name: aegis
+
+x-common-env: &common-env
+  AEGIS_ENV: development
+  AEGIS_LOG_LEVEL: info
+  AEGIS_DATABASE_URL: postgres://aegis:aegis@postgres:5432/aegis?sslmode=disable
+  AEGIS_REDIS_URL: redis://redis:6379/0
+  AEGIS_NATS_URL: nats://nats:4222
+  AEGIS_CLICKHOUSE_URL: clickhouse://aegis:aegis-ch-dev@clickhouse:9000?database=aegis
+  AEGIS_S3_ENDPOINT: http://rustfs:9000
+  AEGIS_S3_BUCKET: aegis
+  AEGIS_S3_ACCESS_KEY: aegis
+  AEGIS_S3_SECRET_KEY: aegis-secret-change-me
+  AEGIS_JWT_SECRET: change-me-32-bytes-min-secret-key
+  # Demo deployment serves plain HTTP, so the refresh cookie must not set
+  # the Secure flag (browsers drop Secure cookies on http origins). Leave
+  # unset (defaults to true) in HTTPS production deployments — the cookie
+  # then gets __Host- prefix + Secure automatically.
+  AEGIS_AUTH_COOKIE_SECURE: "false"
+  AEGIS_BOOTSTRAP_ADMIN_EMAIL: admin@aegis.local
+  AEGIS_BOOTSTRAP_ADMIN_PASSWORD: aegis-demo-admin-2026
+  AEGIS_DEMO_MODE: "true"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: aegis
+      POSTGRES_PASSWORD: aegis
+      POSTGRES_DB: aegis
+    ports:
+      - "127.0.0.1:5432:5432"   # hybrid dev: native server/worker on the host
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegis"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "300", "1"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes: [redisdata:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  nats:
+    image: nats:2.10-alpine
+    # Enable the monitoring listener used by the health check below. NATS does
+    # not expose port 8222 unless explicitly configured, even when JetStream
+    # itself is ready on the client port.
+    command: ["-js", "-m", "8222"]
+    ports:
+      - "127.0.0.1:4222:4222"
+    volumes: [natsdata:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8222/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    environment:
+      # Without these the image's entrypoint locks the default user to
+      # container-internal 127.0.0.1 and host connections fail with code 516.
+      # CLICKHOUSE_USER (non-default) replaces the default user entirely.
+      CLICKHOUSE_DB: aegis
+      CLICKHOUSE_USER: aegis
+      CLICKHOUSE_PASSWORD: aegis-ch-dev
+    ports:
+      - "127.0.0.1:9000:9000"   # native protocol; HTTP (8123) not used by aegis
+    volumes: [chdata:/var/lib/clickhouse]
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      # HTTP /ping is unauthenticated and independent of the CH user setup.
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # RustFS replaces MinIO: MinIO pulled every image from Docker Hub in 2025
+  # and moved away from open source. RustFS (rustfs/rustfs, Apache-2.0) is an
+  # S3-compatible drop-in — the minio-go client in the server talks to it
+  # unchanged. Runs as non-root uid 10001; the named volume inherits that
+  # ownership on first use.
+  rustfs:
+    image: rustfs/rustfs:latest
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      RUSTFS_ACCESS_KEY: aegis
+      RUSTFS_SECRET_KEY: aegis-secret-change-me
+      RUSTFS_VOLUMES: /data
+      RUSTFS_ADDRESS: 0.0.0.0:9000
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_CONSOLE_ADDRESS: 0.0.0.0:9001
+    ports:
+      - "127.0.0.1:9001:9000"   # S3 API on host 9001 (host 9000 = ClickHouse)
+      - "127.0.0.1:9002:9001"   # RustFS web console (login = S3 access/secret)
+    volumes: [rustfsdata:/data]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  server:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.server
+    environment:
+      <<: *common-env
+      AEGIS_METRICS_ADDR: ":9091"
+      # Dev CA lives on writable /tmp (runs as uid 10001); it regenerates on
+      # container recreation — production mounts the real CA via secrets.
+      AEGIS_AGENT_CA_CERT: /tmp/aegis-agent-ca.crt
+      AEGIS_AGENT_CA_KEY: /tmp/aegis-agent-ca.key
+    ports:
+      - "8080:8080"   # HTTP API
+      - "9091:9091"   # Prometheus metrics
+      # 9090 (agent gRPC) kept internal; expose when deploying remote agents:
+      # - "9090:9090"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      nats: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      rustfs: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8080/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.worker
+    environment:
+      <<: *common-env
+    depends_on:
+      server: { condition: service_healthy }
+    deploy:
+      replicas: 1
+
+  feed-worker:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.feed-worker
+    environment:
+      <<: *common-env
+      # Optional NVD API key (https://data.nist.gov): raises the rate limit
+      # from 5 to 50 requests/30s — the first full sync drops from ~half an
+      # hour to minutes. Leave empty for unauthenticated pacing.
+      AEGIS_NVD_API_KEY: ${AEGIS_NVD_API_KEY:-}
+      # Feed selection / kill switch for the heavy bootstrap downloads
+      # (cvelistv5 ships a ~350 MB archive on first run).
+      AEGIS_FEEDS_ENABLED: ${AEGIS_FEEDS_ENABLED:-nvd,kev,epss,cvelistv5}
+      # Health endpoint for the container probe below (opt-in flag).
+      AEGIS_METRICS_ADDR: :9091
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://127.0.0.1:9091/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      server: { condition: service_healthy }
+
+  scanner:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.scanner
+    environment:
+      <<: *common-env
+      # Empty uses the first site for a zero-config local demo. Set this in
+      # .env when the local scanner should serve a specific site instead.
+      AEGIS_SCANNER_SITE_ID: ${AEGIS_SCANNER_SITE_ID:-}
+      AEGIS_SCANNER_NAME: scanner-local
+      AEGIS_SCANNER_CAPABILITIES: ipv4,ipv6,nmap,simulated
+      AEGIS_SCANNER_NMAP_PATH: /usr/bin/nmap
+    # Least privilege, production-safe: the scanner gets exactly ONE
+    # capability — NET_RAW (raw sockets for nmap -sS / -O / ICMP + UDP
+    # traceroute probes) — and nothing else; no-new-privileges blocks any
+    # setuid escalation. nmap/traceroute also carry file caps in the image,
+    # so `docker compose run --user 10001 scanner` works too. Never use
+    # privileged: true here.
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      server: { condition: service_healthy }
+    # LAN topology tracing (device <-> gateway <-> device) works from the
+    # bridge network. Full hop-by-hop WAN traceroutes additionally need the
+    # host NAT to pass ICMP Time Exceeded back into the container — Docker
+    # Desktop (Win/mac) swallows those, so middle hops show `* * *` even
+    # though the target is reached. The engine ladders TCP SYN → UDP → ICMP
+    # → TCP connect → tracepath probes to cope, and marks partial paths
+    # instead of reporting "no route". On Linux hosts uncomment for full
+    # WAN paths:
+    # network_mode: host   # linux only; give up container network isolation
+    # In-container verification: docker compose exec scanner verify-traceroute
+
+  frontend:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.frontend
+    ports: ["3000:80"]
+    depends_on:
+      server: { condition: service_healthy }
+
+  # --- optional monitoring profile: docker compose --profile monitoring up
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: [monitoring]
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9092:9090"]
+
+  # --- optional sensors (spec §90). Suricata/Zeek write EVE/JSON logs to a
+  # shared volume; any log shipper (or a small sidecar) POSTs them to
+  # POST /api/v1/sensors/{sensorID}/events?source=suricata.
+  suricata:
+    image: jasonish/suricata:latest
+    profiles: [sensors]
+    entrypoint: suricata
+    command: ["-c", "/etc/suricata/suricata.yaml", "-i", "eth0"]
+    network_mode: host
+    cap_add: [NET_RAW, NET_ADMIN]
+    volumes: [sensorlogs:/var/log/suricata]
+    # Logs land in the sensorlogs volume; ship EVE JSON with your shipper.
+
+volumes:
+  pgdata:
+  redisdata:
+  natsdata:
+  chdata:
+  rustfsdata:
+  sensorlogs:

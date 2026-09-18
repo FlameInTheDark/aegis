@@ -1,0 +1,61 @@
+# ==============================================================================
+# Aegis Security Platform — Prometheus scrape configuration
+#
+# Used by the optional `monitoring` compose profile. Every Aegis service
+# exposes /metrics (Prometheus text format) on its AEGIS_METRICS_ADDR, which
+# defaults to :9091 inside the compose network. Metric label cardinality is
+# deliberately bounded — no IPs, no tenant ids, no asset ids (spec §48).
+# ==============================================================================
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+  external_labels:
+    monitor: aegis
+
+scrape_configs:
+  # Control plane: HTTP API, gRPC agent transport, ingestion pipeline.
+  - job_name: aegis-server
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['server:9091']
+        labels:
+          service: server
+
+  # Background jobs: reports, detection evaluation, schedules, housekeeping.
+  - job_name: aegis-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['worker:9091']
+        labels:
+          service: worker
+
+  # Vulnerability feed synchronization (nvd, kev, epss, osv, vulnrichment).
+  - job_name: aegis-feed-worker
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['feed-worker:9091']
+        labels:
+          service: feed-worker
+
+  # Distributed scanner node(s). In ENTERPRISE deployments, register each
+  # scanner here (static or via file_sd/service discovery).
+  - job_name: aegis-scanner
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['scanner:9091']
+        labels:
+          service: scanner
+
+  # Prometheus self-monitoring.
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+# Alert rules are not bundled; a starter set belongs in deploy/prometheus/rules
+# once the team agrees on paging thresholds. Useful signals:
+#   rate(aegis_http_requests_total{status=~"5.."}[5m])
+#   aegis_nats_consumer_lag
+#   rate(aegis_events_dropped_total[5m])
+#   aegis_agent_connected

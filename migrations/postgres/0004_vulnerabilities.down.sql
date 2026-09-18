@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS feed_sync_runs;
+DROP TABLE IF EXISTS feed_sources;
+DROP TABLE IF EXISTS osv_records;
+DROP TABLE IF EXISTS vulnerability_sources;
+DROP TABLE IF EXISTS vulnerability_kev;
+DROP TABLE IF EXISTS vulnerability_epss;
+DROP TABLE IF EXISTS vulnerability_references;
+DROP TABLE IF EXISTS vulnerability_cpe_matches;
+DROP TABLE IF EXISTS vulnerabilities;

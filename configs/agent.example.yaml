@@ -1,0 +1,85 @@
+# ==============================================================================
+# Aegis Security Platform — endpoint agent configuration (example)
+# ==============================================================================
+#
+# Copy to /etc/aegis/agent.yaml (Linux/macOS) or C:\ProgramData\Aegis\agent.yaml
+# (Windows) and fill in `server_url` + `enrollment_token` for first enrollment.
+# After a successful enrollment the agent holds a DEVICE CERTIFICATE; the
+# enrollment token is no longer needed and should be revoked in the UI.
+#
+# PRIVACY POSTURE (docs/AGENT.md):
+#   * collection toggles below are allowlists — a capability that is off is
+#     never collected, never sent, and not even asked for by the server.
+#   * privacy_level: metadata_only (default) means the agent reports facts
+#     (installed software, listening sockets, posture booleans) and NEVER
+#     content (no keystrokes, no screenshots, no packet captures, no browser
+#     data, no credential material of any kind).
+#
+# Precedence: environment variables (AEGIS_*) override values in this file.
+# ==============================================================================
+
+# --- Server --------------------------------------------------------------------
+# Base URL of the Aegis server. The gRPC transport is derived from it.
+server_url: https://aegis.example.com    # AEGIS_SERVER_URL
+
+# --- Enrollment ------------------------------------------------------------------
+# One-time enrollment token minted in the UI (Agents -> Enrollment tokens).
+# Tokens are single-use, short-lived, and stored server-side only as a hash.
+# Leave the value in place only until first successful start, then remove it.
+enrollment_token: ""                     # AEGIS_ENROLLMENT_TOKEN  (secret)
+enrollment_token_file: ""                # AEGIS_ENROLLMENT_TOKEN_FILE (secret;
+                                         # recommended on Windows: read from
+                                         # a protected file instead of ps args)
+
+# --- Identity & state ------------------------------------------------------------
+# Where the device certificate, private key and offline buffer live.
+state_dir: /var/lib/aegis-agent          # AEGIS_AGENT_STATE_DIR
+# Site the endpoint belongs to (UUID). Optional; enrollment binds it otherwise.
+site_id: ""                              # AEGIS_AGENT_SITE_ID
+
+# --- Connection --------------------------------------------------------------------
+transport: grpc                          # AEGIS_AGENT_TRANSPORT  grpc (mTLS) | http
+heartbeat_interval: 30s                  # AEGIS_AGENT_HEARTBEAT
+task_poll_interval: 10s                  # AEGIS_AGENT_TASK_POLL
+# Offline buffering: events queue to disk when disconnected (bounded).
+offline_buffer_max_bytes: 52428800       # 50 MiB   # AEGIS_AGENT_BUFFER_MAX_BYTES
+offline_buffer_flush_interval: 1m        # AEGIS_AGENT_BUFFER_FLUSH_INTERVAL
+
+# --- Collection capabilities (allowlist toggles) -------------------------------------
+# What the agent MAY collect and report. The server may only issue tasks for
+# capabilities the agent reports; anything disabled is never collected.
+capabilities:
+  basic_inventory: true        # hostname, OS family/version, kernel, arch,
+                               # CPU/RAM, serial/machine-id, interfaces, disks
+  software_inventory: true     # installed packages (dpkg/rpm/apk), winget on
+                               # Windows, plus select ecosystems (npm/pypi/go)
+  network_inventory: true      # interfaces, addresses, gateways, routes (no
+                               # traffic content), neighbor cache summary
+  security_posture: true       # firewall on/off, AV presence, disk encryption,
+                               # auto-update state, secure boot, local admins
+  process_inventory: false     # process list snapshot (pid/name/user only).
+                               # OFF by default; enable deliberately — it is
+                               # the most privacy-sensitive inventory.
+  local_events: false          # posture_change / service_state event stream.
+                               # OFF by default.
+
+# --- Privacy level ----------------------------------------------------------------------
+# metadata_only (default) — facts only, never content. See docs/AGENT.md for
+# the full matrix and what the agent NEVER does (no remote shell, no credential
+# collection, no content capture).
+privacy_level: metadata_only         # AEGIS_AGENT_PRIVACY_LEVEL  metadata_only
+
+# Redaction applied before anything leaves the endpoint: process command lines
+# are dropped entirely unless explicitly enabled (and even then they are
+# tokenized server-side and never shown in the UI).
+collect_cmdline: false               # AEGIS_AGENT_COLLECT_CMDLINE
+
+# --- Local scan (optional, strictly localhost) --------------------------------------------
+# Permits the server to request a localhost-only port scan of this endpoint.
+# It binds to loopback targets and never sends packets onto the network.
+allow_local_scan: false              # AEGIS_AGENT_ALLOW_LOCAL_SCAN
+
+# --- Logging -------------------------------------------------------------------------------
+log:
+  level: info                        # AEGIS_LOG_LEVEL
+  format: console                    # AEGIS_LOG_FORMAT

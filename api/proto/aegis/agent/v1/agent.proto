@@ -1,0 +1,181 @@
+syntax = "proto3";
+
+package aegis.agent.v1;
+
+option go_package = "github.com/FlameInTheDark/aegis/api/gen/aegis/agent/v1;agentv1";
+
+// AgentService is the endpoint agent <-> control plane protocol (spec §136).
+// Transport is gRPC over TLS. Agents authenticate with device certificates
+// issued at enrollment; private keys never leave the endpoint.
+service AgentService {
+  // Enroll exchanges a one-time enrollment token plus a CSR for a device
+  // certificate. Called once per endpoint.
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  // GetConfig returns the agent's collection configuration.
+  rpc GetConfig(GetConfigRequest) returns (AgentConfig);
+  // Heartbeat reports liveness and basic runtime state.
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  // SubmitInventory reports system inventory (authoritative OS data).
+  rpc SubmitInventory(InventoryReport) returns (SubmitResponse);
+  // SubmitSoftware reports installed software/packages.
+  rpc SubmitSoftware(SoftwareReport) returns (SubmitResponse);
+  // SubmitNetworkState reports listening sockets and interfaces.
+  rpc SubmitNetworkState(NetworkStateReport) returns (SubmitResponse);
+  // SubmitSecurityPosture reports firewall/AV/encryption state.
+  rpc SubmitSecurityPosture(SecurityPostureReport) returns (SubmitResponse);
+  // PollTasks fetches pending typed tasks (spec §19: no remote shell).
+  rpc PollTasks(PollTasksRequest) returns (PollTasksResponse);
+  // CompleteTask reports a task result.
+  rpc CompleteTask(CompleteTaskRequest) returns (SubmitResponse);
+  // StreamEvents streams telemetry events to the platform.
+  rpc StreamEvents(stream AgentEvent) returns (SubmitResponse);
+}
+
+message EnrollRequest {
+  string token = 1;          // one-time enrollment token
+  string csr_pem = 2;        // CSR generated on the endpoint (public key only)
+  string hostname = 3;
+  string platform = 4;       // windows | linux | darwin
+  string platform_version = 5;
+  string arch = 6;
+  string agent_version = 7;
+  string machine_id = 8;     // stable local identifier
+}
+
+message EnrollResponse {
+  string agent_id = 1;
+  string certificate_pem = 2; // device certificate signed by platform CA
+  string org_id = 3;
+  string site_id = 4;
+  int32 heartbeat_interval_secs = 5;
+}
+
+message GetConfigRequest { string agent_id = 1; }
+
+message AgentConfig {
+  int32 heartbeat_interval_secs = 1;
+  repeated string capabilities = 2;      // enabled collection capabilities
+  string collection_level = 3;           // basic|standard|full (privacy tiers)
+  bool local_scan_enabled = 4;
+  int32 offline_buffer_max_bytes = 5;
+  string config_version = 6;
+}
+
+message HeartbeatRequest {
+  string agent_id = 1;
+  string agent_version = 2;
+  uint64 uptime_secs = 3;
+  int32 pending_events = 4;
+}
+
+message HeartbeatResponse { string server_time = 1; }
+
+message InventoryReport {
+  string agent_id = 1;
+  string hostname = 2;
+  string fqdn = 3;
+  string os_family = 4;
+  string os_name = 5;
+  string os_version = 6;
+  string kernel = 7;
+  string arch = 8;
+  uint64 uptime_secs = 9;
+  string cpu_model = 10;
+  int32 cpu_cores = 11;
+  uint64 memory_total = 12;
+  string serial_number = 13;
+  string machine_id = 14;
+  repeated Iface interfaces = 15;
+  repeated Disk disks = 16;
+}
+
+message Iface {
+  string name = 1;
+  string mac = 2;
+  repeated string ips = 3;
+  int32 mtu = 4;
+  uint64 speed_mbps = 5;
+  string status = 6;
+  int32 vlan_id = 7;
+}
+
+message Disk {
+  string device = 1;
+  string mountpoint = 2;
+  string filesystem = 3;
+  uint64 total_bytes = 4;
+  uint64 free_bytes = 5;
+}
+
+message SoftwareReport {
+  message Package {
+    string name = 1;
+    string version = 2;
+    string vendor = 3;
+    string ecosystem = 4;  // os_debian|os_rpm|os_alpine|npm|pypi|go|...
+    string source = 5;
+  }
+  string agent_id = 1;
+  repeated Package packages = 2;
+}
+
+message NetworkStateReport {
+  message Socket {
+    string protocol = 1;   // tcp|udp
+    string local_ip = 2;
+    int32 local_port = 3;
+    string process_name = 4;
+    int32 pid = 5;
+  }
+  string agent_id = 1;
+  repeated Socket listening_sockets = 2;
+  repeated string default_gateways = 3;
+  repeated string dns_servers = 4;
+  bool firewall_enabled = 5;
+}
+
+message SecurityPostureReport {
+  string agent_id = 1;
+  bool firewall_enabled = 2;
+  string firewall_product = 3;
+  bool av_enabled = 4;
+  string av_product = 5;
+  string disk_encryption = 6;  // enabled|partial|disabled|unknown
+  string auto_updates = 7;     // enabled|disabled|unknown
+  string secure_boot = 8;      // enabled|disabled|unknown
+  repeated string local_admins = 9;
+}
+
+message PollTasksRequest { string agent_id = 1; }
+
+message AgentTask {
+  string id = 1;
+  string type = 2;               // inventory_refresh|software_inventory|...
+  string args_json = 3;
+  string issued_at = 4;
+  string expires_at = 5;
+}
+
+message PollTasksResponse { repeated AgentTask tasks = 1; }
+
+message CompleteTaskRequest {
+  string agent_id = 1;
+  string task_id = 2;
+  bool success = 3;
+  string error = 4;
+  string result_json = 5; // bounded; large results go to object storage
+}
+
+message AgentEvent {
+  string agent_id = 1;
+  string type = 2;         // posture_change|process_start|service_state|...
+  string occurred_at = 3;
+  string payload_json = 4; // bounded to 256KiB by the server
+  string schema_version = 5;
+}
+
+message SubmitResponse {
+  bool accepted = 1;
+  int32 accepted_count = 2;
+  string error = 3;
+}

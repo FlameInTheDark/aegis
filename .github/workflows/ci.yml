@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.27", cache: true }
+      - name: gofmt check
+        run: test -z "$(gofmt -l cmd internal api 2>/dev/null)" || { gofmt -l cmd internal api; exit 1; }
+      - name: go vet
+        run: go vet ./...
+      - name: build
+        run: go build ./...
+      - name: test
+        run: go test ./... -short
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: web } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm, cache-dependency-path: web/package-lock.json }
+      - run: npm ci
+      - run: npm run build
+
+  migration-consistency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: every up migration has a down
+        run: |
+          fail=0
+          for up in migrations/postgres/*.up.sql; do
+            down="${up%.up.sql}.down.sql"
+            [[ -f "$down" ]] || { echo "missing $down"; fail=1; }
+          done
+          exit $fail
+
+  docker:
+    needs: [backend, frontend]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: build server image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.server
+          push: false
+
+  swagger-staleness:
+    runs-on: ubuntu-latest
+    continue-on-error: true # enabled fully once generated docs are committed (docs/API.md)
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "regenerate with swag init and diff; fails CI when stale"

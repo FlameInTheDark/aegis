@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aegis.fullname" . }}-feed-worker
+  labels: {{- include "aegis.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas.feedWorker }}
+  selector: { matchLabels: { app: aegis-feed-worker } }
+  template:
+    metadata: { labels: { app: aegis-feed-worker } }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: feed-worker
+          image: {{ include "aegis.image" (merge . (dict "image" "aegis-feed-worker")) }}
+          env: {{- include "aegis.env" . | nindent 12 }}
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+---
+# Scanner: needs NET_RAW for nmap SYN/OS scans (spec §88: minimum capability,
+# never privileged). Bind to nodes with network proximity to the target site.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aegis.fullname" . }}-scanner
+  labels: {{- include "aegis.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas.scanner }}
+  selector: { matchLabels: { app: aegis-scanner } }
+  template:
+    metadata: { labels: { app: aegis-scanner } }
+    spec:
+      # hostNetwork: false is the default; enable only with node isolation.
+      containers:
+        - name: scanner
+          image: {{ include "aegis.image" (merge . (dict "image" "aegis-scanner")) }}
+          env: {{- include "aegis.env" . | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL], add: [NET_RAW] }
+          resources: {{- toYaml .Values.resources | nindent 12 }}

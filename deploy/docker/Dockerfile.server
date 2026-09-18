@@ -1,0 +1,24 @@
+# Aegis control plane: HTTP API + gRPC agent transport + metrics.
+# syntax=docker/dockerfile:1
+FROM golang:1.27-alpine AS build
+WORKDIR /src
+RUN apk add --no-cache git ca-certificates
+COPY go.mod go.sum ./
+RUN go mod download
+# One COPY per directory: multi-token COPY lines are parsed as N sources +
+# ONE destination (last token), NOT as src->dest pairs — the merged line
+# previously dumped cmd/, internal/ and api/ into migrations/ and broke
+# `go build ./cmd/server` with "stat /src/cmd/server: directory not found".
+COPY cmd/ cmd/
+COPY internal/ internal/
+COPY api/ api/
+COPY migrations/ migrations/
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/aegis-server ./cmd/server
+
+FROM alpine:3.20
+# wget is used by the Compose health check against /healthz.
+RUN apk add --no-cache ca-certificates wget && addgroup -g 10001 aegis && adduser -u 10001 -G aegis -D -H aegis
+COPY --from=build /out/aegis-server /usr/local/bin/aegis-server
+USER 10001
+EXPOSE 8080 9090 9091
+ENTRYPOINT ["aegis-server"]

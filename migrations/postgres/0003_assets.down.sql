@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS software_observations;
+DROP TABLE IF EXISTS software;
+DROP TABLE IF EXISTS service_observations;
+DROP TABLE IF EXISTS services;
+DROP TABLE IF EXISTS mac_addresses;
+DROP TABLE IF EXISTS ip_addresses;
+DROP TABLE IF EXISTS network_interfaces;
+DROP TABLE IF EXISTS asset_identifiers;
+DROP TABLE IF EXISTS assets;

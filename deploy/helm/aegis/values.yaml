@@ -1,0 +1,36 @@
+image:
+  repository: ghcr.io/aegis-platform
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicas:
+  server: 2
+  worker: 2
+  scanner: 1
+  feedWorker: 1
+
+resources:
+  requests: { cpu: 100m, memory: 128Mi }
+  limits: { cpu: "1", memory: 512Mi }
+
+config:
+  env: production
+  logLevel: info
+  databaseURL: postgres://aegis:aegis@postgres:5432/aegis?sslmode=disable
+  redisURL: redis://redis:6379/0
+  natsURL: nats://nats:4222
+  clickhouseURL: clickhouse://clickhouse:9000
+  s3Endpoint: http://rustfs:9000
+  s3Bucket: aegis
+  # secrets must come from a Secret, never values.yaml in real deployments
+  jwtSecret: change-me
+  bootstrapAdminEmail: admin@aegis.local
+  bootstrapAdminPassword: change-me
+
+ingress:
+  enabled: false
+  className: nginx
+  host: aegis.example.com
+  tls:
+    enabled: false
+    secretName: aegis-tls

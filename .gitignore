@@ -1,0 +1,56 @@
+# Binaries
+/bin/
+/dist/
+# go build ./cmd/<name> drops a binary into the repo root
+/server
+/worker
+/feed-worker
+/scanner
+/agent
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go
+*.test
+*.out
+coverage.txt
+vendor/
+
+# Frontend
+web/node_modules/
+web/dist/
+*.tsbuildinfo
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+!**/testdata/**/*.key
+
+# Data
+/data/
+/volumes/
+/certs/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Generated (regenerate with make generate)
+# api/swagger/docs.go, api/swagger/swagger.json, api/swagger/swagger.yaml are committed.
+
+# local user uploads
+/upload/
+
+# tool scratch output
+/tool-results/
+scanner
+scanner-*
+server

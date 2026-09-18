@@ -1,0 +1,78 @@
+# ==============================================================================
+# Aegis Security Platform — server configuration reference
+# ==============================================================================
+#
+# HOW CONFIGURATION IS RESOLVED
+#
+# The server is environment-first (12-factor): every setting below maps to an
+# environment variable and ENV ALWAYS WINS. This file is the operator-facing
+# reference / template for deployments that render config files (k8s Helm
+# values, VM provisioning) and then export the variables.
+#
+# Precedence: environment variable > default in internal/config/config.go.
+# Secrets must never be committed to a file like this — use your secret
+# manager and inject them as environment variables.
+# ==============================================================================
+
+# --- Core ---------------------------------------------------------------------
+env: production                    # AEGIS_ENV          development|staging|production
+log:
+  level: info                      # AEGIS_LOG_LEVEL    debug|info|warn|error
+  format: json                     # AEGIS_LOG_FORMAT   console|json
+
+http:
+  addr: ":8080"                    # AEGIS_HTTP_ADDR    HTTP API + web transport
+grpc:
+  addr: ":9090"                    # AEGIS_GRPC_ADDR    agent transport (mTLS)
+metrics:
+  addr: ":9091"                    # AEGIS_METRICS_ADDR /healthz /readyz /metrics
+
+# Public URL of the web UI — used for CORS and outbound links (reports, webhooks).
+public_url: https://aegis.example.com   # AEGIS_PUBLIC_URL
+
+# --- Data layer ---------------------------------------------------------------
+database_url: postgres://aegis:aegis@localhost:5432/aegis?sslmode=require   # DATABASE_URL
+redis_url: redis://localhost:6379/0                                        # REDIS_URL
+nats_url: nats://localhost:4222                                            # NATS_URL
+clickhouse_url: clickhouse://aegis:aegis-ch-dev@localhost:9000?database=aegis                 # CLICKHOUSE_URL
+
+# --- Object storage (any S3-compatible endpoint; raw feed archives, reports) --
+s3:
+  endpoint: http://localhost:9000   # S3_ENDPOINT
+  bucket: aegis                     # S3_BUCKET
+  access_key: ""                    # S3_ACCESS_KEY   (secret — inject via env)
+  secret_key: ""                    # S3_SECRET_KEY   (secret — inject via env)
+  use_ssl: false                    # S3_USE_SSL
+  region: us-east-1                 # S3_REGION
+
+# --- Auth ---------------------------------------------------------------------
+auth:
+  # 48+ bytes of entropy. Validated >= 32 chars in production. Rotate per your
+  # policy; rotation invalidates issued access tokens.
+  jwt_secret: ""                    # AEGIS_JWT_SECRET   (secret — inject via env)
+  access_token_ttl: 1h              # AEGIS_ACCESS_TOKEN_TTL (SPA renews silently before expiry)
+  refresh_token_ttl: 720h           # AEGIS_REFRESH_TOKEN_TTL  (30 days)
+  # First-boot bootstrap account (owner role). Change the password immediately
+  # after first login. Ignored once the user exists.
+  bootstrap_admin_email: admin@aegis.local   # AEGIS_BOOTSTRAP_ADMIN_EMAIL
+  bootstrap_admin_password: ""               # AEGIS_BOOTSTRAP_ADMIN_PASSWORD (secret)
+
+# --- Agent CA (mTLS for endpoint agents) ---------------------------------------
+# Generate with your PKI tooling; see docs/AGENT.md for the enrollment flow.
+agent_ca:
+  cert_path: ./configs/pki/agent-ca.crt   # AEGIS_AGENT_CA_CERT
+  key_path: ./configs/pki/agent-ca.key    # AEGIS_AGENT_CA_KEY   (secret)
+
+# --- TLS for the HTTP API (optional; terminate at the proxy otherwise) --------
+tls:
+  cert_file: ""                     # AEGIS_TLS_CERT
+  key_file: ""                      # AEGIS_TLS_KEY   (secret)
+
+# --- Tracing (optional OpenTelemetry) -----------------------------------------
+otel:
+  endpoint: ""                      # OTEL_EXPORTER_OTLP_ENDPOINT (empty = off)
+  sample_ratio: 0.05                # AEGIS_TRACES_SAMPLE_RATIO
+
+# --- Bootstrap behavior --------------------------------------------------------
+demo_mode: false                    # AEGIS_DEMO_MODE  seeds synthetic demo data on first boot
+                                    # NEVER enable outside a lab.

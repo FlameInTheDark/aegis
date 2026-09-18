@@ -1,0 +1,54 @@
+===============================================================================
+ Aegis Security Platform has been deployed.
+===============================================================================
+
+Release:      {{ .Release.Name }}  (namespace: {{ .Release.Namespace }})
+Chart:        {{ .Chart.Name }}-{{ .Chart.Version }}  (app: {{ .Chart.AppVersion }})
+
+{{- if .Values.ingress.enabled }}
+
+1. Web UI:
+
+   https://{{ .Values.ingress.host }}
+
+   Login with the bootstrap admin configured via the aegis-secrets Secret
+   (AEGIS_BOOTSTRAP_ADMIN_EMAIL / AEGIS_BOOTSTRAP_ADMIN_PASSWORD). Rotate the
+   password after first login.
+
+{{- else }}
+
+1. Web UI (port-forward):
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "aegis.fullname" . }}-frontend 3000:80
+   # then open http://localhost:3000
+
+   Login with the bootstrap admin from the aegis-secrets Secret
+   (AEGIS_BOOTSTRAP_ADMIN_EMAIL / AEGIS_BOOTSTRAP_ADMIN_PASSWORD).
+
+   To expose properly, enable the Ingress (ingress.enabled=true with TLS).
+
+{{- end }}
+
+2. API:
+
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "aegis.fullname" . }}-server 8080:8080
+   # API root:    http://localhost:8080/api/v1
+   # Swagger UI:  http://localhost:8080/swagger/index.html
+   # Health:      http://localhost:8080/healthz  |  /readyz
+
+3. Verify the rollout:
+
+   kubectl -n {{ .Release.Namespace }} get pods,svc
+   kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "aegis.fullname" . }}-server -f
+
+   On first boot the server applies PostgreSQL migrations and the ClickHouse
+   schema, then creates the bootstrap admin. With AEGIS_DEMO_MODE=false
+   (recommended outside labs) follow the first-run wizard in the UI.
+
+4. Safety reminder:
+
+   This platform is for networks you OWN or are AUTHORIZED to assess.
+   Keep AEGIS_SCAN_ALLOW_PUBLIC_SCOPES=false and define explicit scan scopes.
+
+Documentation: docs/DEPLOYMENT.md, docs/OPERATIONS.md, docs/SECURITY-MODEL.md
+===============================================================================

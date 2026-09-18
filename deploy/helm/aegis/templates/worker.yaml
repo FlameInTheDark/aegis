@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aegis.fullname" . }}-worker
+  labels: {{- include "aegis.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas.worker }}
+  selector: { matchLabels: { app: aegis-worker } }
+  template:
+    metadata:
+      labels: { app: aegis-worker }
+      annotations: { prometheus.io/scrape: "true", prometheus.io/port: "9091" }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: worker
+          image: {{ include "aegis.image" (merge . (dict "image" "aegis-worker")) }}
+          env: {{- include "aegis.env" . | nindent 12 }}
+          readinessProbe: { httpGet: { path: /healthz, port: 8080 }, initialDelaySeconds: 5, failureThreshold: 30 }
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "aegis.fullname" . }}-worker
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: {{ include "aegis.fullname" . }}-worker }
+  minReplicas: {{ .Values.replicas.worker }}
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }

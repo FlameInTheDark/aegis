@@ -1,0 +1,10 @@
+Aegis Security Platform installed.
+
+1. Data layer (postgres/redis/nats/clickhouse/rustfs) is expected from your
+   environment (cloud-managed or operators) — config.databaseURL points there.
+2. Create the secret:
+   kubectl create secret generic {{ .Release.Name }}-aegis-secret \
+     --from-literal=database-url='...' \
+     --from-literal=jwt-secret='...'
+3. Get the UI URL: kubectl get ingress
+4. Bootstrap admin credentials come from config (bootstrapAdmin*).

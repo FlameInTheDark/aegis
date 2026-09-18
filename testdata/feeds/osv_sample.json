@@ -1,0 +1,17 @@
+{
+  "id": "OSV-2026-1337",
+  "summary": "Prototype pollution in demo-lib",
+  "details": "A crafted input merges keys into Object.prototype (synthetic sample).",
+  "aliases": ["CVE-2026-3001", "GHSA-demo-1337"],
+  "modified": "2026-09-01T12:00:00Z",
+  "published": "2026-08-20T12:00:00Z",
+  "affected": [
+    {
+      "package": { "ecosystem": "npm", "name": "demo-lib" },
+      "ranges": [ { "type": "ECOSYSTEM", "events": [ { "introduced": "1.0.0" }, { "fixed": "1.4.2" } ] } ],
+      "database_specific": { "last_known_affected_version_range": "<= 1.4.1" }
+    }
+  ],
+  "references": [ { "type": "ADVISORY", "url": "https://example.dev/advisories/demo-lib" } ],
+  "database_specific": { "severity": "MODERATE" }
+}

@@ -1,0 +1,49 @@
+{
+  "resultsPerPage": 2,
+  "startIndex": 0,
+  "totalResults": 2,
+  "format": "NVD_CVE",
+  "version": "2.0",
+  "timestamp": "2026-09-14T21:00:00.000",
+  "vulnerabilities": [
+    {
+      "cve": {
+        "id": "CVE-2026-2001",
+        "sourceIdentifier": "example@vendor.com",
+        "published": "2026-08-01T14:00:00.000",
+        "lastModified": "2026-09-01T09:00:00.000",
+        "vulnStatus": "PUBLISHED",
+        "descriptions": [
+          { "lang": "en", "value": "ExampleCorp Edge Gateway admin interface OS command injection." },
+          { "lang": "es", "value": "Inyeccion de comandos en la interfaz de administracion." }
+        ],
+        "metrics": {
+          "cvssMetricV31": [
+            {
+              "source": "example@vendor.com",
+              "type": "Primary",
+              "cvssData": { "version": "3.1", "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", "baseScore": 9.8, "baseSeverity": "CRITICAL" }
+            }
+          ]
+        },
+        "weaknesses": [ { "source": "example@vendor.com", "type": "Primary", "description": [ { "lang": "en", "value": "CWE-78" } ] } ],
+        "references": [ { "url": "https://example.com/advisory/2026-2001" } ],
+        "configurations": [
+          { "nodes": [ { "operator": "OR", "negate": false, "cpeMatch": [
+            { "vulnerable": true, "criteria": "cpe:2.3:a:examplecorp:edge_gateway:5.2.0:*:*:*:*:*:*:*", "versionEndExcluding": "5.2.4" }
+          ] } ] }
+        ]
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-2026-2002",
+        "sourceIdentifier": "sample@soft.io",
+        "published": "2026-08-15T14:00:00.000",
+        "lastModified": "2026-08-15T14:00:00.000",
+        "vulnStatus": "REJECTED",
+        "descriptions": [ { "lang": "en", "value": "Rejected: duplicate assignment." } ]
+      }
+    }
+  ]
+}

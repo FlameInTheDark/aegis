@@ -1,0 +1,7 @@
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: aegis-server
+    static_configs: [{ targets: ["server:9091"] }]
+  - job_name: aegis-worker
+    static_configs: [{ targets: ["worker:9091"] }]

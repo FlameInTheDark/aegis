@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: aegis-feed-worker, namespace: aegis, labels: { app: aegis-feed-worker } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: aegis-feed-worker } }
+  template:
+    metadata: { labels: { app: aegis-feed-worker } }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: feed-worker
+          image: ghcr.io/aegis-platform/aegis-feed-worker:latest
+          envFrom:
+            - configMapRef: { name: aegis-config }
+            - secretRef: { name: aegis-secret }
+          resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: 500m, memory: 256Mi } }
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }

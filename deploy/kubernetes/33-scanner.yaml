@@ -1,0 +1,23 @@
+# Scanner workload (spec §88/§89): NET_RAW is the only added capability,
+# never privileged. hostNetwork only when scanning the node's own network
+# segment and the node is dedicated/isolated.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: aegis-scanner, namespace: aegis, labels: { app: aegis-scanner } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: aegis-scanner } }
+  template:
+    metadata: { labels: { app: aegis-scanner } }
+    spec:
+      # hostNetwork: false  # set true ONLY for site-adjacent scanning on an isolated node
+      containers:
+        - name: scanner
+          image: ghcr.io/aegis-platform/aegis-scanner:latest
+          envFrom:
+            - configMapRef: { name: aegis-config }
+            - secretRef: { name: aegis-secret }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL], add: [NET_RAW] }
+          resources: { requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: "2", memory: 512Mi } }

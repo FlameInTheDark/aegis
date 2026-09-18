@@ -1,0 +1,77 @@
+{{/*
+Scanner: distributed scan worker. Runs close to the targets it is
+authorized to assess. NET_RAW is required for nmap raw-socket scans and is
+the ONLY capability granted — the scanner is never run privileged.
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aegis.fullname" . }}-scanner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aegis.labels" . | nindent 4 }}
+    app.kubernetes.io/component: scanner
+spec:
+  replicas: {{ .Values.scanner.replicas }}
+  selector:
+    matchLabels:
+      {{- include "aegis.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: scanner
+  template:
+    metadata:
+      labels:
+        {{- include "aegis.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: scanner
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+    spec:
+      {{- with .Values.scanner.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.scanner.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      hostNetwork: {{ .Values.scanner.hostNetwork }}
+      hostPID: false
+      # nmap raw sockets require root or an explicitly granted NET_RAW cap.
+      securityContext:
+        runAsNonRoot: false
+        runAsUser: 0
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: scanner
+          image: {{ include "aegis.image" (dict "Values" .Values "component" "scanner") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { name: metrics, containerPort: 9091 }
+          env:
+            - name: AEGIS_SCANNER_NAME
+              value: {{ .Values.scanner.name | quote }}
+            - name: AEGIS_SCANNER_SITE_ID
+              value: {{ .Values.scanner.siteId | quote }}
+            - name: AEGIS_SCANNER_CAPABILITIES
+              value: {{ .Values.scanner.capabilities | quote }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "aegis.fullname" . }}-config
+            - secretRef:
+                name: {{ .Values.secrets.existingSecret }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_RAW"]
+          resources:
+            {{- toYaml .Values.scanner.resources | nindent 12 }}
+          livenessProbe:
+            httpGet: { path: /healthz, port: 9091 }
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          readinessProbe:
+            httpGet: { path: /readyz, port: 9091 }
+            initialDelaySeconds: 10
+            periodSeconds: 10

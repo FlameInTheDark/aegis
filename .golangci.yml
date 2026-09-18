@@ -1,0 +1,44 @@
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  disable-all: true
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - gosimple
+    - ineffassign
+    - gosec
+    - misspell
+    - revive
+    - gofumpt
+    - gocritic
+    - bodyclose
+    - noctx
+    - sqlclosecheck
+    - unconvert
+    - unparam
+
+linters-settings:
+  gosec:
+    excludes:
+      - G104 # unhandled errors are reviewed manually in IO paths
+  revive:
+    rules:
+      - name: exported
+        arguments: ["enableStuttering"]
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - gosec
+        - errcheck
+    - path: api/swagger/docs.go
+      linters:
+        - all
+  max-issues-per-linter: 50
+  max-same-issues: 5

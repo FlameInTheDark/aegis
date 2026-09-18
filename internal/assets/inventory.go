@@ -1,0 +1,349 @@
+// Package assets implements asset provisioning and correlation (spec §25):
+// different scanners report the same device differently; an identity
+// resolver merges observations into logical assets without ever merging
+// two devices solely because they shared an IP at different times.
+package assets
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+
+	"github.com/FlameInTheDark/aegis/internal/domain"
+	"github.com/FlameInTheDark/aegis/internal/ids"
+	pg "github.com/FlameInTheDark/aegis/internal/repository/postgres"
+)
+
+// Service provisions assets from observations.
+type Service struct {
+	Assets   *pg.AssetRepo
+	Ident    *pg.IdentifierRepo
+	Ifaces   *pg.InterfaceRepo
+	Services *pg.ServiceRepo
+	Software *pg.SoftwareRepo
+	Changes  *pg.ChangeRepo
+	Log      *slog.Logger
+	// IPStale bounds how long an IP observation keeps resolving to the same
+	// asset. 0 (the default) means: within a site, an address always maps to
+	// the asset that last held it — rescans update the asset instead of
+	// creating a copy. Strong identifiers (agent/mac/hostname) still win
+	// first, so a genuinely new device appearing at a reused address is
+	// recognized by its MAC/hostname and the IP moves to it.
+	IPStale time.Duration
+}
+
+// ProvisionHost upserts a host observed at a site. Identity resolution:
+//  1. strong identifiers (agent/cert/mac/serial/machine_id) win,
+//  2. the address resolves to the asset that last held this IP in the site
+//     (address-aware: rescans refresh the same asset instead of copying it;
+//     see Service.IPStale for the optional staleness bound),
+//  3. otherwise a NEW asset is created.
+func (s *Service) ProvisionHost(ctx context.Context, orgID, siteID, scanID, ip, mac, hostname, fqdn, source string, conf domain.Confidence) (*domain.Asset, bool, error) {
+	created := false
+	asset := s.findByStrongID(ctx, mac, hostname, fqdn)
+	if asset == nil {
+		asset = s.findByAddress(ctx, orgID, siteID, ip)
+	}
+	if asset == nil {
+		asset = &domain.Asset{
+			ID: ids.New(), OrganizationID: orgID, SiteID: siteID,
+			DeviceType: domain.DeviceUnknown, Exposure: domain.ExposureInternal,
+			Criticality: domain.CriticalityMedium,
+			// The observation confidence describes PRESENCE, not the
+			// OS/device classification. Seeding os_confidence with it
+			// (0.85 from discovery) used to block every later OS
+			// fingerprint of lower numeric confidence — OS data starts
+			// at 0 and is filled in by RecordOS/RecordDevice.
+			DeviceTypeConf: 0.2, DeviceTypeSrcs: []string{source},
+		}
+		if err := s.Assets.Insert(ctx, asset); err != nil {
+			return nil, false, err
+		}
+		created = true
+		if s.Changes != nil && scanID != "" {
+			s.recordChange(ctx, scanID, siteID, domain.ChangeNewAsset, asset.ID, "", "", ip)
+		}
+	}
+
+	// Merge identity data.
+	if mac != "" {
+		_ = s.Ident.Upsert(ctx, asset.ID, "mac", strings.ToLower(mac), domain.IdentifierWeights["mac"])
+	}
+	if ip != "" {
+		_ = s.Ident.Upsert(ctx, asset.ID, "ip", ip, domain.IdentifierWeights["ip"])
+	}
+	if hostname != "" {
+		_ = s.Ident.Upsert(ctx, asset.ID, "hostname", strings.ToLower(hostname), domain.IdentifierWeights["hostname"])
+	}
+	if fqdn != "" {
+		_ = s.Ident.Upsert(ctx, asset.ID, "fqdn", strings.ToLower(fqdn), domain.IdentifierWeights["fqdn"])
+	}
+
+	// Enrich fields when we have better evidence than stored.
+	fields := map[string]any{"last_seen": time.Now().UTC()}
+	if hostname != "" && asset.Hostname == "" {
+		fields["hostname"] = hostname
+	}
+	if fqdn != "" && asset.FQDN == "" {
+		fields["fqdn"] = fqdn
+	}
+	if mac != "" && asset.Vendor == "" {
+		if v := OUIVendor(mac); v != "" {
+			fields["vendor"] = v
+		}
+	}
+	if err := s.Assets.Update(ctx, asset.ID, fields); err != nil {
+		s.Log.Warn("asset enrich failed", "asset", asset.ID, "err", err)
+	}
+	if ip != "" {
+		s.ensureInterface(ctx, asset.ID, mac, ip)
+	}
+	return asset, created, nil
+}
+
+// RecordOS applies an OS observation with confidence and source (§15).
+// Override semantics: the LATEST observation of equal or higher confidence
+// replaces the stored fingerprint (equal-confidence observations refresh the
+// values instead of bouncing off them), so a fresh scan always updates the
+// asset. Endpoint agents remain authoritative over network guesses.
+func (s *Service) RecordOS(ctx context.Context, scanID, siteID, assetID, family, name, version string, conf domain.Confidence, source string) {
+	if assetID == "" {
+		return
+	}
+	// An observation with no OS content must not move the confidence dial:
+	// stamping os_confidence without family/name/version would block every
+	// later real fingerprint of lower numeric confidence.
+	if family == "" && name == "" && version == "" {
+		return
+	}
+	cur, err := s.Assets.ByID(ctx, "", assetID)
+	if err != nil || cur == nil {
+		return
+	}
+	// Endpoint agent is authoritative over network guesses; otherwise the
+	// latest evidence at equal or better confidence wins.
+	if conf >= cur.OSConfidence || source == string(domain.SourceAgent) {
+		fields := map[string]any{
+			"os_confidence": conf, "last_seen": time.Now().UTC(),
+		}
+		if family != "" {
+			fields["os_family"] = family
+		}
+		if name != "" {
+			fields["os_name"] = name
+		}
+		if version != "" {
+			fields["os_version"] = version
+		}
+		srcs := cur.OSSources
+		if !contains(srcs, source) {
+			srcs = append(srcs, source)
+			fields["os_sources"] = srcs
+		}
+		if cur.OSName != "" && name != "" && cur.OSName != name {
+			if s.Changes != nil && scanID != "" {
+				s.recordChange(ctx, scanID, siteID, domain.ChangeOSChanged, assetID, "os", cur.OSName, name)
+			}
+		}
+		_ = s.Assets.Update(ctx, assetID, fields)
+	}
+}
+
+// RecordDevice applies device-type classification with confidence.
+// Override semantics mirror RecordOS: evidence at equal or higher confidence
+// wins (floor 0.5), so a dedicated fingerprint scan refreshes the
+// classification while a weak service-table hint (0.55) can fill an
+// unclassified asset but never tramples a MAC-vendor or osclass verdict.
+func (s *Service) RecordDevice(ctx context.Context, scanID, siteID, assetID string, dt domain.DeviceType, conf domain.Confidence, source string) {
+	if assetID == "" || dt == "" || dt == domain.DeviceUnknown {
+		return
+	}
+	if conf < domain.Confidence(0.5) {
+		return
+	}
+	cur, err := s.Assets.ByID(ctx, "", assetID)
+	if err != nil || cur == nil {
+		return
+	}
+	if conf < cur.DeviceTypeConf {
+		return
+	}
+	fields := map[string]any{"device_type": dt, "device_type_confidence": conf, "last_seen": time.Now().UTC()}
+	if s := source; s != "" {
+		fields["device_type_sources"] = []string{s}
+	}
+	_ = s.Assets.Update(ctx, assetID, fields)
+}
+
+// RecordService upserts an observed service and records change deltas.
+func (s *Service) RecordService(ctx context.Context, orgID, siteID, scanID, assetID string, svc *domain.Service) (*domain.Service, error) {
+	existing, _ := s.findService(ctx, assetID, svc.Port, svc.Protocol)
+	if existing != nil {
+		svc.ID = existing.ID
+		svc.FirstSeen = existing.FirstSeen
+	} else {
+		if svc.ID == "" {
+			svc.ID = ids.New()
+		}
+		if s.Changes != nil && scanID != "" {
+			s.recordChange(ctx, scanID, siteID, domain.ChangeServiceOpened, assetID, fmt.Sprintf("%s/%d", svc.Protocol, svc.Port), "", svc.ServiceName)
+		}
+	}
+	svc.OrganizationID = orgID
+	svc.AssetID = assetID
+	svc.LastSeen = time.Now().UTC()
+	if existing != nil && existing.Product != "" && svc.Product != existing.Product {
+		if s.Changes != nil && scanID != "" {
+			s.recordChange(ctx, scanID, siteID, domain.ChangeServiceChanged, assetID, fmt.Sprintf("%s/%d", svc.Protocol, svc.Port), existing.Product, svc.Product)
+		}
+	}
+	if err := s.Services.Upsert(ctx, svc); err != nil {
+		return nil, err
+	}
+	return svc, nil
+}
+
+// RecordSoftware upserts an agent-reported package.
+func (s *Service) RecordSoftware(ctx context.Context, orgID, siteID, scanID, assetID string, sw *domain.Software) error {
+	sw.AssetID = assetID
+	sw.LastSeen = time.Now().UTC()
+	if sw.ID == "" {
+		sw.ID = ids.New()
+	}
+	return s.Software.Upsert(ctx, sw)
+}
+
+// MarkMissingAgent records an agent-absent posture change for a site.
+func (s *Service) MarkMissingAgent(ctx context.Context, siteID, assetID string) {
+	// placeholder used by the worker's coverage job
+	_ = ctx
+	_ = siteID
+	_ = assetID
+}
+
+func (s *Service) findByStrongID(ctx context.Context, mac, hostname, fqdn string) *domain.Asset {
+	type idpair struct{ typ, val string }
+	var pairs []idpair
+	if mac != "" {
+		pairs = append(pairs, idpair{"mac", strings.ToLower(mac)})
+	}
+	if hostname != "" {
+		pairs = append(pairs, idpair{"hostname", strings.ToLower(hostname)})
+	}
+	if fqdn != "" {
+		pairs = append(pairs, idpair{"fqdn", strings.ToLower(fqdn)})
+	}
+	for _, p := range pairs {
+		idsList, err := s.Ident.FindByIdentifier(ctx, p.typ, p.val)
+		if err != nil || len(idsList) == 0 {
+			continue
+		}
+		// Multiple candidates: ambiguous (same hostname reused). Merge only
+		// when unambiguous — otherwise prefer none and let evidence grow.
+		if len(idsList) > 1 {
+			continue
+		}
+		a, err := s.Assets.ByID(ctx, "", idsList[0])
+		if err == nil && a != nil {
+			return a
+		}
+	}
+	return nil
+}
+
+// findByAddress resolves an IP to the asset that last held it within the
+// site, using the persisted "ip" identifier (indexed by (type, value)) —
+// never a fuzzy text search. The result must belong to the requesting org
+// and site: the same subnet can legitimately exist in two sites.
+func (s *Service) findByAddress(ctx context.Context, orgID, siteID, ip string) *domain.Asset {
+	if ip == "" {
+		return nil
+	}
+	candidates, err := s.Ident.FindByIdentifier(ctx, "ip", ip)
+	if err != nil || len(candidates) == 0 {
+		return nil
+	}
+	var best *domain.Asset
+	for _, id := range candidates {
+		a, err := s.Assets.ByID(ctx, "", id)
+		if err != nil || a == nil || a.OrganizationID != orgID || a.SiteID != siteID {
+			continue
+		}
+		if s.IPStale > 0 && !a.LastSeen.After(time.Now().UTC().Add(-s.IPStale)) {
+			continue // explicitly configured staleness bound exceeded
+		}
+		if best == nil || a.LastSeen.After(best.LastSeen) {
+			best = a
+		}
+	}
+	return best
+}
+
+func (s *Service) findService(ctx context.Context, assetID string, port int, proto string) (*domain.Service, error) {
+	list, err := s.Services.ListForAsset(ctx, assetID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		if list[i].Port == port && strings.EqualFold(list[i].Protocol, proto) {
+			return &list[i], nil
+		}
+	}
+	return nil, fmt.Errorf("not found")
+}
+
+func (s *Service) ensureInterface(ctx context.Context, assetID, mac, ip string) {
+	ifaces, err := s.Ifaces.ListForAsset(ctx, assetID)
+	if err == nil {
+		for _, ifc := range ifaces {
+			if mac != "" && strings.EqualFold(ifc.MAC, mac) {
+				return
+			}
+			if mac == "" {
+				return // avoid interface spam from IP-only observations
+			}
+		}
+	}
+	now := time.Now().UTC()
+	_ = s.Ifaces.Upsert(ctx, &domain.Interface{ID: ids.New(), AssetID: assetID, MAC: strings.ToLower(mac), Status: "unknown", FirstSeen: now, LastSeen: now})
+}
+
+func (s *Service) recordChange(ctx context.Context, scanID, siteID string, t domain.ChangeType, assetID, entity, before, after string) {
+	_ = s.Changes.Insert(ctx, &domain.Change{ID: ids.New(), ScanID: scanID, SiteID: siteID, Type: t, AssetID: assetID, Entity: entity, Before: before, After: after, CreatedAt: time.Now().UTC()})
+}
+
+func contains(xs []string, v string) bool {
+	for _, x := range xs {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+// ouiVendorMap is a deliberately small vendor prefix table for evidence
+// enrichment (not authoritative device classification).
+var ouiVendorMap = map[string]string{
+	"00:1a:2b": "Ayecom", "00:50:56": "VMware", "00:0c:29": "VMware", "00:05:69": "VMware",
+	"08:00:27": "Oracle VirtualBox", "52:54:00": "QEMU/KVM", "b8:27:eb": "Raspberry Pi",
+	"dc:a6:32": "Raspberry Pi", "e4:5f:01": "Raspberry Pi", "00:1b:63": "Apple",
+	"f0:18:98": "Apple", "3c:06:30": "Apple", "00:26:bb": "Apple",
+	"00:15:5d": "Microsoft Hyper-V", "00:1d:7e": "Cisco", "00:23:04": "Cisco",
+	"f8:bc:12": "Ubiquiti", "24:5a:4c": "Ubiquiti", "78:8a:20": "Ubiquiti",
+	"00:17:88": "Philips Hue", "ec:fa:bc": "Amazon", "44:65:0d": "Amazon",
+	"00:e0:4c": "Realtek", "d8:bb:c1": "Wistron", "00:25:90": "Supermicro",
+	"0c:c4:7a": "Intel", "3c:97:0e": "Wistron", "a4:bb:6d": "HP",
+	"00:1e:4f": "Fortinet", "00:09:0f": "Fortinet", "00:0d:b9": "PC Engines",
+}
+
+// OUIVendor resolves a MAC prefix to a vendor hint.
+func OUIVendor(mac string) string {
+	mac = strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(mac, "-", ":"), ".", ":"))
+	parts := strings.Split(mac, ":")
+	if len(parts) < 3 {
+		return ""
+	}
+	return ouiVendorMap[strings.Join(parts[:3], ":")]
+}

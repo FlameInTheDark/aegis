@@ -1,0 +1,51 @@
+# ==============================================================================
+# Aegis Security Platform — worker configuration reference
+# ==============================================================================
+#
+# The worker executes background jobs pulled from NATS JetStream queues and
+# internal schedules:
+#
+#   reports      — report definition -> job -> artifact rendering (spec §50)
+#   detection    — event batch evaluation against detection rules (spec §40)
+#   schedules    — scan schedule firing (CRON) (spec §68)
+#   feed-triggers— feed sync scheduling hand-off to the feed-worker
+#   housekeeping — expired sessions/tokens cleanup, dedup window GC
+#
+# Queue selection: AEGIS_WORKER_QUEUES=reports,detection (comma-separated).
+# Unset runs all queues. All handlers are idempotent (at-least-once delivery).
+#
+# Precedence: environment variables ALWAYS override this file.
+# ==============================================================================
+
+env: production                    # AEGIS_ENV
+log:
+  level: info                      # AEGIS_LOG_LEVEL
+  format: json                     # AEGIS_LOG_FORMAT
+
+metrics:
+  addr: ":9091"                    # AEGIS_METRICS_ADDR  (/healthz /readyz /metrics)
+
+# --- Data layer ----------------------------------------------------------------
+database_url: postgres://aegis:aegis@localhost:5432/aegis?sslmode=require   # DATABASE_URL
+redis_url: redis://localhost:6379/0                                        # REDIS_URL
+nats_url: nats://localhost:4222                                            # NATS_URL
+clickhouse_url: clickhouse://aegis:aegis-ch-dev@localhost:9000?database=aegis                 # CLICKHOUSE_URL
+
+s3:
+  endpoint: http://localhost:9000   # S3_ENDPOINT  (report artifacts live in S3)
+  bucket: aegis                     # S3_BUCKET
+  access_key: ""                    # S3_ACCESS_KEY (secret)
+  secret_key: ""                    # S3_SECRET_KEY (secret)
+  use_ssl: false                    # S3_USE_SSL
+
+# --- Queue selection -------------------------------------------------------------
+# Leave empty for all queues. Use comma-separated subsets to shard workers:
+#   AEGIS_WORKER_QUEUES=reports,detection
+queues: []                         # AEGIS_WORKER_QUEUES
+
+# --- Feature toggles -------------------------------------------------------------
+demo_mode: false                   # AEGIS_DEMO_MODE
+
+otel:
+  endpoint: ""                     # OTEL_EXPORTER_OTLP_ENDPOINT
+  sample_ratio: 0.05               # AEGIS_TRACES_SAMPLE_RATIO

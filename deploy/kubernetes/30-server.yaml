@@ -1,0 +1,34 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: aegis-server, namespace: aegis, labels: { app: aegis-server } }
+spec:
+  replicas: 2
+  selector: { matchLabels: { app: aegis-server } }
+  template:
+    metadata:
+      labels: { app: aegis-server }
+      annotations: { prometheus.io/scrape: "true", prometheus.io/port: "9091" }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: server
+          image: ghcr.io/aegis-platform/aegis-server:latest
+          ports: [ { containerPort: 8080 }, { containerPort: 9090 }, { containerPort: 9091 } ]
+          envFrom:
+            - configMapRef: { name: aegis-config }
+            - secretRef: { name: aegis-secret }
+          readinessProbe: { httpGet: { path: /readyz, port: 8080 }, initialDelaySeconds: 5, periodSeconds: 10 }
+          livenessProbe: { httpGet: { path: /healthz, port: 8080 }, initialDelaySeconds: 15, periodSeconds: 20 }
+          resources:
+            requests: { cpu: 200m, memory: 256Mi }
+            limits: { cpu: "1", memory: 1Gi }
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: aegis-server, namespace: aegis }
+spec:
+  selector: { app: aegis-server }
+  ports:
+    - { name: http, port: 8080 }
+    - { name: grpc, port: 9090 }

@@ -1,0 +1,49 @@
+{{/* Feed worker: vulnerability intelligence synchronization (single replica). */}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "aegis.fullname" . }}-feed-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "aegis.labels" . | nindent 4 }}
+    app.kubernetes.io/component: feed-worker
+spec:
+  replicas: {{ .Values.feedWorker.replicas }}
+  selector:
+    matchLabels:
+      {{- include "aegis.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: feed-worker
+  template:
+    metadata:
+      labels:
+        {{- include "aegis.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: feed-worker
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: feed-worker
+          image: {{ include "aegis.image" (dict "Values" .Values "component" "feed-worker") }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { name: metrics, containerPort: 9091 }
+          envFrom:
+            - configMapRef:
+                name: {{ include "aegis.fullname" . }}-config
+            - secretRef:
+                name: {{ .Values.secrets.existingSecret }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.feedWorker.resources | nindent 12 }}
+          livenessProbe:
+            httpGet: { path: /healthz, port: 9091 }
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          readinessProbe:
+            httpGet: { path: /readyz, port: 9091 }
+            initialDelaySeconds: 10
+            periodSeconds: 15

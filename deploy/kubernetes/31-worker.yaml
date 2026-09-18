@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: aegis-worker, namespace: aegis, labels: { app: aegis-worker } }
+spec:
+  replicas: 3
+  selector: { matchLabels: { app: aegis-worker } }
+  template:
+    metadata: { labels: { app: aegis-worker } }
+    spec:
+      securityContext: { runAsNonRoot: true, runAsUser: 10001, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: worker
+          image: ghcr.io/aegis-platform/aegis-worker:latest
+          envFrom:
+            - configMapRef: { name: aegis-config }
+            - secretRef: { name: aegis-secret }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata: { name: aegis-worker, namespace: aegis }
+spec:
+  scaleTargetRef: { apiVersion: apps/v1, kind: Deployment, name: aegis-worker }
+  minReplicas: 3
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource: { name: cpu, target: { type: Utilization, averageUtilization: 70 } }
