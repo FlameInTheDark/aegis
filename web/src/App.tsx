@@ -1,23 +1,24 @@
-import { Component, ReactNode } from 'react'
+import { Component, lazy, ReactNode, Suspense } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { AuthProvider, useAuth } from '@/lib/auth'
 import { AppShell } from '@/components/layout/AppShell'
 import LoginPage from '@/features/auth/LoginPage'
-import DashboardPage from '@/features/dashboard/DashboardPage'
-import AssetsPage from '@/features/assets/AssetsPage'
-import AssetDetailPage from '@/features/assets/AssetDetailPage'
-import TopologyPage from '@/features/topology/TopologyPage'
-import ScansPage from '@/features/scans/ScansPage'
-import ScanDetailPage from '@/features/scans/ScanDetailPage'
-import VulnerabilitiesPage from '@/features/vulnerabilities/VulnerabilitiesPage'
-import VulnerabilityDetailPage from '@/features/vulnerabilities/VulnerabilityDetailPage'
-import FindingsPage from '@/features/findings/FindingsPage'
-import DetectionRulesPage from '@/features/detections/DetectionsPage'
-import EventsPage from '@/features/events/EventsPage'
-import AgentsPage from '@/features/agents/AgentsPage'
-import AgentDetailPage from '@/features/agents/AgentDetailPage'
-import ReportsPage from '@/features/reports/ReportsPage'
-import SettingsPage from '@/features/settings/SettingsPage'
+
+const DashboardPage = lazy(() => import('@/features/dashboard/DashboardPage'))
+const AssetsPage = lazy(() => import('@/features/assets/AssetsPage'))
+const AssetDetailPage = lazy(() => import('@/features/assets/AssetDetailPage'))
+const TopologyPage = lazy(() => import('@/features/topology/TopologyPage'))
+const ScansPage = lazy(() => import('@/features/scans/ScansPage'))
+const ScanDetailPage = lazy(() => import('@/features/scans/ScanDetailPage'))
+const VulnerabilitiesPage = lazy(() => import('@/features/vulnerabilities/VulnerabilitiesPage'))
+const VulnerabilityDetailPage = lazy(() => import('@/features/vulnerabilities/VulnerabilityDetailPage'))
+const FindingsPage = lazy(() => import('@/features/findings/FindingsPage'))
+const DetectionRulesPage = lazy(() => import('@/features/detections/DetectionsPage'))
+const EventsPage = lazy(() => import('@/features/events/EventsPage'))
+const AgentsPage = lazy(() => import('@/features/agents/AgentsPage'))
+const AgentDetailPage = lazy(() => import('@/features/agents/AgentDetailPage'))
+const ReportsPage = lazy(() => import('@/features/reports/ReportsPage'))
+const SettingsPage = lazy(() => import('@/features/settings/SettingsPage'))
 
 // Error boundary keeps failures local and logs internally (§134).
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
@@ -65,27 +66,29 @@ export default function App() {
   return (
     <ErrorBoundary>
       <AuthProvider>
-        <Routes>
-          <Route path="/login" element={<LoginPage />} />
-          <Route element={<RequireAuth><AppShell /></RequireAuth>}>
-          <Route path="/" element={<DashboardPage />} />
-          <Route path="/assets" element={<AssetsPage />} />
-          <Route path="/assets/:id" element={<AssetDetailPage />} />
-          <Route path="/topology" element={<TopologyPage />} />
-          <Route path="/scans" element={<ScansPage />} />
-          <Route path="/scans/:id" element={<ScanDetailPage />} />
-          <Route path="/vulnerabilities" element={<VulnerabilitiesPage />} />
-          <Route path="/vulnerabilities/:cveId" element={<VulnerabilityDetailPage />} />
-          <Route path="/findings" element={<FindingsPage />} />
-          <Route path="/detections" element={<DetectionRulesPage />} />
-          <Route path="/events" element={<EventsPage />} />
-          <Route path="/agents" element={<AgentsPage />} />
-          <Route path="/agents/:id" element={<AgentDetailPage />} />
-          <Route path="/reports" element={<ReportsPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-        </Route>
-        <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+        <Suspense fallback={<AuthSplash />}>
+          <Routes>
+            <Route path="/login" element={<LoginPage />} />
+            <Route element={<RequireAuth><AppShell /></RequireAuth>}>
+              <Route path="/" element={<DashboardPage />} />
+              <Route path="/assets" element={<AssetsPage />} />
+              <Route path="/assets/:id" element={<AssetDetailPage />} />
+              <Route path="/topology" element={<TopologyPage />} />
+              <Route path="/scans" element={<ScansPage />} />
+              <Route path="/scans/:id" element={<ScanDetailPage />} />
+              <Route path="/vulnerabilities" element={<VulnerabilitiesPage />} />
+              <Route path="/vulnerabilities/:cveId" element={<VulnerabilityDetailPage />} />
+              <Route path="/findings" element={<FindingsPage />} />
+              <Route path="/detections" element={<DetectionRulesPage />} />
+              <Route path="/events" element={<EventsPage />} />
+              <Route path="/agents" element={<AgentsPage />} />
+              <Route path="/agents/:id" element={<AgentDetailPage />} />
+              <Route path="/reports" element={<ReportsPage />} />
+              <Route path="/settings" element={<SettingsPage />} />
+            </Route>
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Suspense>
       </AuthProvider>
     </ErrorBoundary>
   )

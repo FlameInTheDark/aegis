@@ -51,6 +51,3 @@ web/dist/
 
 # tool scratch output
 /tool-results/
-scanner
-scanner-*
-server
