@@ -50,3 +50,4 @@ web/dist/
 scanner
 scanner-*
 server
+internal/scanner/
