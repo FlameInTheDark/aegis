@@ -11,7 +11,7 @@ COPY internal/ internal/
 COPY api/ api/
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/aegis-agent ./cmd/agent
 
-FROM alpine:3.20
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates && addgroup -g 10001 aegis && adduser -u 10001 -G aegis -D -H aegis
 COPY --from=build /out/aegis-agent /usr/local/bin/aegis-agent
 USER 10001
