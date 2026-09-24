@@ -4,7 +4,7 @@ import (
 	"time"
 )
 
-// ReportType enumerates supported report types (spec §50).
+// ReportType enumerates supported report types.
 type ReportType string
 
 const (
@@ -31,7 +31,7 @@ const (
 	ReportJSON ReportFormat = "json"
 )
 
-// ReportDefinition describes what a report includes (spec §138).
+// ReportDefinition describes what a report includes.
 type ReportDefinition struct {
 	ID             string       `json:"id"`
 	OrganizationID string       `json:"organization_id"`
@@ -64,7 +64,7 @@ type ReportJob struct {
 	FinishedAt  *time.Time `json:"finished_at,omitempty"`
 }
 
-// AuditEntry is one auditable action (spec §7/§85).
+// AuditEntry is one auditable action.
 type AuditEntry struct {
 	ID        string         `json:"id"`
 	OrgID     string         `json:"organization_id"`
@@ -81,7 +81,7 @@ type AuditEntry struct {
 	CreatedAt time.Time      `json:"created_at"`
 }
 
-// Note is an analyst note on any entity (spec §168).
+// Note is an analyst note on any entity.
 type Note struct {
 	ID         string    `json:"id"`
 	OrgID      string    `json:"organization_id"`
@@ -93,7 +93,7 @@ type Note struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
-// Team is a simple grouping for ownership (spec §169).
+// Team is a simple grouping for ownership.
 type Team struct {
 	ID        string    `json:"id"`
 	OrgID     string    `json:"organization_id"`
@@ -101,7 +101,7 @@ type Team struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// WebhookConfig is an alerting channel (spec §170).
+// WebhookConfig is an alerting channel.
 type WebhookConfig struct {
 	ID        string     `json:"id"`
 	OrgID     string     `json:"organization_id"`

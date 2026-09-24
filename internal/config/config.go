@@ -6,6 +6,8 @@ package config
 
 import (
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -79,16 +81,38 @@ type Config struct {
 		Capabilities     []string
 	}
 
+	SSHScan struct {
+		Hosts     []SSHHost
+		User      string
+		Password  string
+		KeyPath   string
+		Timeout   time.Duration
+		Insecure  bool
+		PinnedKey string
+	}
+
 	Feeds struct {
-		Enabled    []string
-		Interval   time.Duration
-		CVEListURL string
-		NVDAPIKey  string
+		Enabled     []string
+		Interval    time.Duration
+		CVEListURL  string
+		NVDAPIKey   string
+		OvalSources []OvalSource
 	}
 
 	OTel struct {
 		Endpoint    string
 		SampleRatio float64
+	}
+
+	// Connector configures the unified external-connection plane
+	// (aegis.connector.v1): endpoint agents, remote scanners, collectors.
+	Connector struct {
+		// PublicAddr is the gRPC endpoint components reach from their own
+		// networks; it is embedded into UI connect commands and the enroll
+		// response (host:port, e.g. "aegis.example.com:9090").
+		PublicAddr string
+		// EnrollTokenTTL is the validity window of one-time connect tokens.
+		EnrollTokenTTL time.Duration
 	}
 
 	DemoMode bool
@@ -138,7 +162,7 @@ func Load(service string) (*Config, error) {
 	c.Auth.BootstrapAdminEmail = get("AEGIS_BOOTSTRAP_ADMIN_EMAIL", "")
 	c.Auth.BootstrapAdminPassword = get("AEGIS_BOOTSTRAP_ADMIN_PASSWORD", "")
 
-	// Agent device CA (spec §16). Empty env values fall back to ./certs
+	// Agent device CA. Empty env values fall back to./certs
 	// so dev boots auto-generate and persist a CA; production mounts the
 	// real pair via secrets and sets both variables explicitly.
 	c.AgentCA.CertPath = get("AEGIS_AGENT_CA_CERT", "certs/agent-ca.crt")
@@ -169,6 +193,26 @@ func Load(service string) (*Config, error) {
 	c.Scanner.Capabilities = getSlice("AEGIS_SCANNER_CAPABILITIES",
 		[]string{"ipv4", "ipv6", "tcp_connect", "service_detection", "os_guess"})
 
+	// Agent-less SSH collection. Hosts are
+	// "user@host[:port],user@host[:port]" — the collection is read-only.
+	c.SSHScan = struct {
+		Hosts     []SSHHost
+		User      string
+		Password  string
+		KeyPath   string
+		Timeout   time.Duration
+		Insecure  bool
+		PinnedKey string
+	}{
+		Hosts:     parseSSHHosts(get("AEGIS_SSH_SCAN_HOSTS", "")),
+		User:      get("AEGIS_SSH_SCAN_USER", "root"),
+		Password:  get("AEGIS_SSH_SCAN_PASSWORD", ""),
+		KeyPath:   get("AEGIS_SSH_SCAN_KEY_PATH", ""),
+		Timeout:   getDur("AEGIS_SSH_SCAN_TIMEOUT", 60*time.Second),
+		Insecure:  getBool("AEGIS_SSH_SCAN_HOST_KEY_POLICY", false) || get("AEGIS_SSH_SCAN_HOST_KEY_POLICY", "") == "insecure",
+		PinnedKey: get("AEGIS_SSH_SCAN_PINNED_KEY", ""),
+	}
+
 	c.Feeds.Enabled = getSlice("AEGIS_FEEDS_ENABLED",
 		[]string{"nvd", "kev", "epss", "cvelistv5"})
 	c.Feeds.Interval = getDur("AEGIS_FEEDS_INTERVAL", 6*time.Hour)
@@ -177,9 +221,16 @@ func Load(service string) (*Config, error) {
 	// requests/30s to 50 and makes the first full sync minutes instead of
 	// ~half an hour. Request one at https://data.nist.gov (NVD API key).
 	c.Feeds.NVDAPIKey = get("AEGIS_NVD_API_KEY", "")
+	// Distro OVAL snapshots. Off by default —
+	// full snapshots are large; opt in per distro release:
+	//   AEGIS_FEED_OVAL_SOURCES=ubuntu:22.04:https://...bz2:bz2,debian:12:https://...
+	c.Feeds.OvalSources = parseOvalSources(get("AEGIS_FEED_OVAL_SOURCES", ""))
 
 	c.OTel.Endpoint = get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
 	c.OTel.SampleRatio = getFloat("AEGIS_TRACES_SAMPLE_RATIO", 0.05)
+
+	c.Connector.PublicAddr = get("AEGIS_CONNECTOR_PUBLIC_ADDR", deriveGRPCPublicAddr(c.PublicURL, c.GRPCAddr))
+	c.Connector.EnrollTokenTTL = getDur("AEGIS_CONNECTOR_TOKEN_TTL", 24*time.Hour)
 
 	c.DemoMode = getBool("AEGIS_DEMO_MODE", false)
 	c.WorkerQueues = getSlice("AEGIS_WORKER_QUEUES", nil)
@@ -293,4 +344,99 @@ func getSlice(key string, def []string) []string {
 		return out
 	}
 	return def
+}
+
+// OvalSource mirrors feeds.OvalSource without importing the feeds package
+// (config must not depend on feed implementations).
+type OvalSource struct {
+	Family   string
+	Release  string
+	URL      string
+	Compress string
+}
+
+// parseOvalSources parses AEGIS_FEED_OVAL_SOURCES:
+// family:release:URL[:bz2|gz|zip|none], comma-separated.
+func parseOvalSources(raw string) []OvalSource {
+	out := []OvalSource{}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		head := strings.SplitN(part, ":", 3)
+		if len(head) < 3 {
+			continue
+		}
+		src := OvalSource{Family: strings.TrimSpace(head[0]), Release: strings.TrimSpace(head[1]), URL: strings.TrimSpace(head[2])}
+		for _, ext := range []string{"bz2", "gz", "gzip", "zip", "none"} {
+			if suffix := ":" + ext; strings.HasSuffix(src.URL, suffix) {
+				src.URL = strings.TrimSuffix(src.URL, suffix)
+				src.Compress = ext
+				break
+			}
+		}
+		out = append(out, src)
+	}
+	return out
+}
+
+// SSHHost is one agent-less SSH collection target.
+type SSHHost struct {
+	User string
+	Host string
+	Port int
+}
+
+// parseSSHHosts parses "user@host[:port],user@host[:port]" lists. The user
+// part is optional when AEGIS_SSH_SCAN_USER provides a default.
+func parseSSHHosts(raw string) []SSHHost {
+	out := []SSHHost{}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		user := ""
+		if at := strings.IndexByte(part, '@'); at > 0 {
+			user = part[:at]
+			part = part[at+1:]
+		}
+		host, port := part, 0
+		if h, p, err := net.SplitHostPort(part); err == nil {
+			host = h
+			if n, err := strconv.Atoi(p); err == nil {
+				port = n
+			}
+		}
+		if host == "" {
+			continue
+		}
+		out = append(out, SSHHost{User: user, Host: host, Port: port})
+	}
+	return out
+}
+
+// deriveGRPCPublicAddr guesses the externally reachable gRPC endpoint from
+// the public URL's host when AEGIS_CONNECTOR_PUBLIC_ADDR is not set. The
+// gRPC listener is a separate port (default :9090), so only the host part
+// is reused; operators override via the env var in real deployments.
+func deriveGRPCPublicAddr(publicURL, grpcAddr string) string {
+	host := ""
+	if u, err := url.Parse(publicURL); err == nil && u.Hostname() != "" {
+		host = u.Hostname()
+	}
+	if host == "" {
+		if h, _, err := net.SplitHostPort(grpcAddr); err == nil && h != "" && h != "0.0.0.0" && !strings.HasPrefix(h, "[::]") {
+			host = h
+		}
+	}
+	if host == "" {
+		return ""
+	}
+	_, port, err := net.SplitHostPort(grpcAddr)
+	if err != nil || port == "" {
+		port = "9090"
+	}
+	return net.JoinHostPort(host, port)
 }

@@ -17,7 +17,7 @@ spec:
           resources: {{- toYaml .Values.resources | nindent 12 }}
           securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
 ---
-# Scanner: needs NET_RAW for nmap SYN/OS scans (spec §88: minimum capability,
+# Scanner: needs NET_RAW for nmap SYN/OS scans (: minimum capability,
 # never privileged). Bind to nodes with network proximity to the target site.
 apiVersion: apps/v1
 kind: Deployment

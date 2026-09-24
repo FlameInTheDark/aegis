@@ -171,3 +171,61 @@ func TestLastOctet(t *testing.T) {
 		t.Errorf("lastOctet garbage = %d, want 0", got)
 	}
 }
+
+func TestParseNmapDiscoveryMACVendor(t *testing.T) {
+	// v1.14 regression: nmap's resolved OUI vendor string was dropped (only
+	// the device-type hint survived) so the inventory could never show the
+	// hardware vendor behind a MAC address.
+	xml := `<?xml version="1.0" encoding="UTF-8"?>
+<nmaprun>
+<host starttime="1">
+ <status state="up" reason="arp-response"/>
+ <address addr="192.168.1.55" addrtype="ipv4"/>
+ <address addr="B8:27:EB:11:22:33" addrtype="mac" vendor="Raspberry Pi Foundation"/>
+</host>
+</nmaprun>`
+	hosts, err := parseNmapDiscovery([]byte(xml))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(hosts) != 1 {
+		t.Fatalf("want 1 host, got %d", len(hosts))
+	}
+	h := hosts[0]
+	if h.MAC != "B8:27:EB:11:22:33" {
+		t.Errorf("MAC = %q", h.MAC)
+	}
+	if h.MACVendor != "Raspberry Pi Foundation" {
+		t.Errorf("MACVendor = %q, want the nmap OUI string", h.MACVendor)
+	}
+	if h.Device != "iot" {
+		t.Errorf("device hint = %q, want iot", h.Device)
+	}
+}
+
+func TestParseNmapOSCapturesMAC(t *testing.T) {
+	// The -O run's address records carry the MAC for hosts whose discovery
+	// pass missed it; the parser must surface it on OSResult.
+	xml := `<?xml version="1.0" encoding="UTF-8"?>
+<nmaprun>
+<host starttime="1">
+ <status state="up" reason="reset"/>
+ <address addr="10.0.0.7" addrtype="ipv4"/>
+ <address addr="00:50:56:AA:BB:CC" addrtype="mac" vendor="VMware, Inc."/>
+ <os><osmatch name="Linux 5.4" accuracy="98"><osclass type="general purpose" osfamily="linux" gen="linux" vendor="linux"/></osmatch></os>
+</host>
+</nmaprun>`
+	res, err := parseNmapOS([]byte(xml))
+	if err != nil || res == nil {
+		t.Fatalf("parse: %v %+v", err, res)
+	}
+	if res.MAC != "00:50:56:AA:BB:CC" {
+		t.Errorf("MAC = %q", res.MAC)
+	}
+	if res.MACVendor != "VMware, Inc." {
+		t.Errorf("MACVendor = %q", res.MACVendor)
+	}
+	if res.Family != "linux" {
+		t.Errorf("Family = %q", res.Family)
+	}
+}

@@ -122,6 +122,12 @@ func TestCompareTypedDeb(t *testing.T) {
 		{"1:7.4p1-5", "1:7.4p1-4", 1},
 		{"7.4p1-5+deb12u1", "7.4p1-5", 1},
 		{"1.2.3", "1.10", -1},
+		{"1.06", "1.6", 0},                                 // leading zeros compare numerically
+		{"1.0-2ubuntu2", "1.0-2ubuntu10", -1},              // numeric, not lexical
+		{"1:10.0p1-5ubuntu5.4", "1:10.0p1-5ubuntu5.5", -1}, // revision-only security fix
+		{"9999999999999999999999999.0-1", "9999999999999999999999999.0", 1}, // 25-digit run: no overflow
+		{"1.0@1", "1.0", 2}, // malformed: incomparable, never guessed
+		{"a:1.0", "1.0", 2}, // bad epoch: incomparable
 	}
 	for _, tc := range cases {
 		if got := CompareTyped(tc.a, tc.b, "deb"); got != tc.want {
@@ -195,5 +201,16 @@ func TestCompareEcosystem(t *testing.T) {
 	}
 	if got := CompareEcosystem("1.0rc1", "1.0", "PyPI"); got != -1 {
 		t.Errorf("PyPI rc: got %d, want -1", got)
+	}
+	// Distro-qualified OSV names and the platform's own inventory labels
+	// must resolve to the dpkg grammar, not the generic fallback.
+	if got := CompareEcosystem("1:0", "2.0", "Debian:12"); got != 1 {
+		t.Errorf("Debian:12 epoch dominance: got %d, want 1", got)
+	}
+	if got := CompareEcosystem("1.0-2ubuntu10", "1.0-2ubuntu2", "Ubuntu:24.04"); got != 1 {
+		t.Errorf("Ubuntu:24.04 numeric revision: got %d, want 1", got)
+	}
+	if got := CompareEcosystem("1:0", "2.0", "os_debian"); got != 1 {
+		t.Errorf("os_debian label: got %d, want 1", got)
 	}
 }

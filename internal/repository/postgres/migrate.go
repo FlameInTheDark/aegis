@@ -17,7 +17,7 @@ import (
 )
 
 // Migrator applies schema migrations using golang-migrate. Schema changes
-// never happen in arbitrary startup code paths (spec §110).
+// never happen in arbitrary startup code paths.
 type Migrator struct{ m *migrate.Migrate }
 
 // NewMigrator builds a migrator from the embedded migrations.

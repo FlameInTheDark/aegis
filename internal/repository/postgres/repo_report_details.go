@@ -137,7 +137,7 @@ func (r *ReportDetailRepo) interfaces(ctx context.Context, assetID string) ([]do
 		return nil, err
 	}
 	for i := range out {
-		q := r.db.Select("ip::text, is_primary, first_seen, last_seen").From("ip_addresses").Where(squirrel.Eq{"interface_id": out[i].ID}).OrderBy("ip")
+		q := r.db.Select("host(ip) AS ip, is_primary, first_seen, last_seen").From("ip_addresses").Where(squirrel.Eq{"interface_id": out[i].ID}).OrderBy("ip")
 		out[i].Addresses, err = reportRows(ctx, r.db, q, func(row scanner) (*domain.IPObservation, error) {
 			var ip domain.IPObservation
 			err := row.Scan(&ip.IP, &ip.IsPrimary, &ip.FirstSeen, &ip.LastSeen)

@@ -1,0 +1,33 @@
+name: Release
+
+# Semantic-release on every push to main: analyzes conventional commits,
+# cuts the next version (vX.Y.Z tag), updates CHANGELOG.md and attaches the
+# packaged source archives to the GitHub release. Nothing is published when
+# no commit qualifies (feat/fix/…).
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: semantic-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx --yes semantic-release@24

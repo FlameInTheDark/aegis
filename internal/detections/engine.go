@@ -1,7 +1,7 @@
 // Package detections implements the behavioral detection engine
-// (spec §40/§41): typed internal rules with single-event, threshold,
+// : typed internal rules with single-event, threshold,
 // temporal and entity-aggregation semantics, plus Sigma-like metadata and
-// simple statistical baselines (§189). The first implementation is
+// simple statistical baselines. The first implementation is
 // deterministic and explainable — no opaque scores.
 package detections
 
@@ -28,7 +28,7 @@ type Engine struct {
 	Baselines *pg.BaselineRepo
 	Cache     *redisrepo.Client
 	Log       *slog.Logger
-	// Notifier is invoked for critical matches (webhook alerting §170).
+	// Notifier is invoked for critical matches (webhook alerting).
 	Notifier func(ctx context.Context, m *domain.DetectionMatch)
 }
 
@@ -41,7 +41,7 @@ func windowDuration(s string) time.Duration {
 }
 
 // Ingest evaluates one event batch against the org's enabled rules.
-// It is idempotent per event id via redis dedup windows (§79).
+// It is idempotent per event id via redis dedup windows.
 func (e *Engine) Ingest(ctx context.Context, orgID string, events []domain.Event) ([]domain.DetectionMatch, error) {
 	if len(events) == 0 {
 		return nil, nil
@@ -73,7 +73,7 @@ func (e *Engine) Ingest(ctx context.Context, orgID string, events []domain.Event
 				matches = append(matches, ms...)
 			}
 		default:
-			// sequence rules: evaluated over stored match context later (§40)
+			// sequence rules: evaluated over stored match context later
 			e.Log.Debug("unsupported rule type", "type", rule.Type, "rule", rule.ID)
 		}
 	}
@@ -337,7 +337,7 @@ func (e *Engine) evalEntityAgg(ctx context.Context, rule domain.DetectionRule, e
 	return e.evalThreshold(ctx, rule, events)
 }
 
-// claimDedup ensures one match per rule/entity/window (§172). Uses redis
+// claimDedup ensures one match per rule/entity/window. Uses redis
 // SETNX with the window TTL; falls back to per-process memory.
 type dedupState struct {
 	mu map[string]time.Time
@@ -391,7 +391,7 @@ func (e *Engine) UpdateBaseline(ctx context.Context, entity, metric string, valu
 }
 
 // Anomalous reports whether a value deviates >3σ from baseline (never
-// claims malicious — anomaly ≠ confirmed activity, §189/§190).
+// claims malicious — anomaly ≠ confirmed activity).
 func Anomalous(b *domain.Baseline, value float64) (bool, float64) {
 	if b == nil || b.SampleSize < 10 || b.StdDev == 0 {
 		return false, 0
@@ -412,8 +412,8 @@ func sqrt(x float64) float64 {
 	return z
 }
 
-// SeedBuiltinRules inserts the first-run detection rule set (spec §40
-// examples). Rules are explicit, typed and disable-able.
+// SeedBuiltinRules inserts the first-run detection rule set.
+// Rules are explicit, typed and disable-able.
 func SeedBuiltinRules(ctx context.Context, orgID string, r *pg.RuleRepo) error {
 	builtins := []domain.DetectionRule{
 		{

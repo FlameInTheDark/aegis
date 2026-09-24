@@ -122,13 +122,17 @@ func TestIntegrationNullScanRegression(t *testing.T) {
 
 	// --- detection_matches: NULL site_id/asset_id/src_ip
 	org := orgID
+	// The match row must reference the rule seeded above — a hardcoded rule
+	// id violates detection_matches_rule_id_fkey (the insert failed on every
+	// suite run; the rule it pointed at never existed).
+	ruleID := ids.New()
 	if _, err := db.Pool.Exec(ctx, `INSERT INTO detection_rules (id, organization_id, title, identifier, status, description, author, level, type)
-		VALUES ($1, $2, 'ns-rule', 'ns-rule-1', 'stable', '', 'aegis', 'medium', 'threshold')`, ids.New(), org); err != nil {
+		VALUES ($1, $2, 'ns-rule', 'ns-rule-1', 'stable', '', 'aegis', 'medium', 'threshold')`, ruleID, org); err != nil {
 		t.Fatalf("seed rule: %v", err)
 	}
 	if _, err := db.Pool.Exec(ctx, `INSERT INTO detection_matches (id, organization_id, rule_id, rule_title, level, summary, event_ids, count, timestamp)
 		VALUES ($1, $2, $3, 'ns-rule', 'medium', 'ns match', ARRAY[]::text[], 1, now())`,
-		ids.New(), org, "00000000-0000-4000-8000-000000006001"); err != nil {
+		ids.New(), org, ruleID); err != nil {
 		t.Fatalf("seed match: %v", err)
 	}
 	if _, _, err := NewMatchRepo(db).List(ctx, MatchFilter{OrgID: org, Limit: 10, Page: 1}); err != nil {
@@ -137,7 +141,10 @@ func TestIntegrationNullScanRegression(t *testing.T) {
 
 	// --- reports + jobs: NULL site_id/scan_id/min_severity/error
 	rep := &domain.ReportDefinition{OrganizationID: org, Name: "ns-report", Type: domain.ReportExecutive,
-		Format: domain.ReportPDF, Sections: []string{"summary"}, CreatedAt: time.Now().UTC()}
+		Format: domain.ReportPDF, Sections: []string{"summary"},
+		// created_by is NOT NULL (no FK): the NULL-tolerance regression covers
+		// site_id/asset_id/scan_id/min_severity only.
+		CreatedBy: "00000000-0000-4000-8000-00000000c0ff", CreatedAt: time.Now().UTC()}
 	if err := NewReportRepo(db).Create(ctx, rep); err != nil {
 		t.Fatalf("report create: %v", err)
 	}
@@ -153,7 +160,8 @@ func TestIntegrationNullScanRegression(t *testing.T) {
 
 	// --- services: row with NULL tls/http
 	asset := &domain.Asset{ID: ids.New(), OrganizationID: orgID, SiteID: siteID,
-		Hostname: "ns-host", FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC()}
+		Hostname: "ns-host", Exposure: domain.ExposureInternal, Criticality: domain.CriticalityMedium,
+		FirstSeen: time.Now().UTC(), LastSeen: time.Now().UTC()}
 	if err := NewAssetRepo(db).Insert(ctx, asset); err != nil {
 		t.Fatalf("asset insert: %v", err)
 	}

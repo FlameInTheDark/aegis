@@ -63,6 +63,7 @@ const (
 	SourceSnort         Source = "snort"
 	SourceSimulated     Source = "simulated"
 	SourceManual        Source = "manual"
+	SourceAdvisory      Source = "os_advisory"
 	SourceFeed          Source = "feed"
 	SourceHeuristic     Source = "heuristic"
 	SourceBanner        Source = "banner"

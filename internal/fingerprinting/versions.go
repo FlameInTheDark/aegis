@@ -1,5 +1,5 @@
-// versions.go implements version-aware comparison for CVE applicability
-// (spec §32/§33). CVE List v5 "affected" entries carry a versionType
+// versions.go implements version-aware comparison for CVE applicability.
+// CVE List v5 "affected" entries carry a versionType
 // (custom, semver, rpm, deb, python, maven, generic, …) and observed
 // versions come from scanners/banners ("10.0p2 Debian 7"), so matching
 // needs more than dotted-numeric equality:
@@ -16,6 +16,8 @@ package fingerprinting
 import (
 	"strconv"
 	"strings"
+
+	"github.com/FlameInTheDark/aegis/internal/pkgversion"
 )
 
 // versionType constants mirror the versionType values used by CVE List v5
@@ -25,6 +27,7 @@ const (
 	VersionTypeSemver  = "semver"
 	VersionTypeRPM     = "rpm"
 	VersionTypeDeb     = "deb"
+	VersionTypeAPK     = "apk"
 	VersionTypePython  = "python"
 	VersionTypeMaven   = "maven"
 	VersionTypeGeneric = "generic"
@@ -48,6 +51,8 @@ func CompareTyped(a, b, versionType string) int {
 		return debCompare(a, b)
 	case VersionTypeRPM:
 		return rpmCompare(a, b)
+	case VersionTypeAPK, "alpine":
+		return apkCompare(a, b)
 	case VersionTypePython, "pep440":
 		return pythonCompare(a, b)
 	default:
@@ -58,21 +63,52 @@ func CompareTyped(a, b, versionType string) int {
 }
 
 // CompareEcosystem compares two package versions using the OSV ecosystem
-// name ("npm", "PyPI", "Debian", "Alpine v3.x", "Red Hat", …) to pick
-// ordering rules. Used by the OSV package path.
+// name ("npm", "PyPI", "Debian", "Debian:12", "Alpine v3.x", "Red Hat",
+// ...) to pick ordering rules. Used by the OSV package path. The
+// platform's own software-inventory labels (os_debian, os_rpm,
+// os_alpine) and distro-qualified feed names ("Ubuntu:22.04 LTS",
+// "Debian:12") resolve to their package-manager grammar via prefix
+// matching, so OSV records never fall through to the generic ordering
+// by accident.
 func CompareEcosystem(a, b, ecosystem string) int {
-	switch strings.ToLower(strings.TrimSpace(ecosystem)) {
-	case "npm", "go", "golang", "crates.io", "cargo", "rubygems", "hex", "packagist", "pub", "swifturl":
+	eco := strings.ToLower(strings.TrimSpace(ecosystem))
+	switch {
+	case ecoIs(eco, "npm", "go", "golang", "crates.io", "cargo", "rubygems", "hex", "packagist", "pub", "swifturl"):
 		return semverCompare(CleanVersion(a), CleanVersion(b))
-	case "pypi":
+	case ecoIs(eco, "pypi") || ecoHasPrefix(eco, "pypi"):
 		return pythonCompare(CleanVersion(a), CleanVersion(b))
-	case "debian", "ubuntu", "alpine", "deb", "linux":
+	case ecoIs(eco, "alpine", PkgEcoAlpine) || ecoHasPrefix(eco, "alpine"):
+		// Alpine has its own grammar (apk-tools); deb ordering is wrong
+		// for it (e.g. "1.2.13-r2" vs "_rc" suffixes).
+		return apkCompare(CleanVersion(a), CleanVersion(b))
+	case ecoIs(eco, "debian", "ubuntu", "deb", "dpkg", "linux", PkgEcoDebian) || ecoHasPrefix(eco, "debian:", "ubuntu"):
 		return debCompare(CleanVersion(a), CleanVersion(b))
-	case "rpm", "red hat", "fedora", "centos", "suse", "opensuse", "rocky linux", "almalinux":
+	case ecoIs(eco, "rpm", "fedora", "centos", "suse", "opensuse", "rocky linux", "almalinux", PkgEcoRPM) || ecoHasPrefix(eco, "red hat", "rhel", "centos", "rocky", "almalinux", "alma", "suse", "opensuse", "sles"):
 		return rpmCompare(CleanVersion(a), CleanVersion(b))
 	default:
 		return customCompare(CleanVersion(a), CleanVersion(b))
 	}
+}
+
+// ecoIs reports exact membership in names; ecoHasPrefix reports prefix
+// matching against prefixes. Both operate on the lowercased, trimmed
+// ecosystem label.
+func ecoIs(eco string, names ...string) bool {
+	for _, n := range names {
+		if eco == n {
+			return true
+		}
+	}
+	return false
+}
+
+func ecoHasPrefix(eco string, prefixes ...string) bool {
+	for _, p := range prefixes {
+		if strings.HasPrefix(eco, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // CleanVersion normalizes an observed version string: it drops
@@ -121,7 +157,7 @@ func CleanVersion(raw string) string {
 	}
 	v = strings.Trim(v, "()[]{}\"',;")
 	if !strings.ContainsFunc(v, isDigitRune) {
-		return "" // not a version — never pretend (§33)
+		return "" // not a version — never pretend
 	}
 	return v
 }
@@ -332,7 +368,7 @@ func semverCompare(a, b string) int {
 }
 
 // splitSemver separates "1.2.3-rc.1+build" into ("1.2.3", "rc.1"); build
-// metadata is ignored per semver §10.
+// metadata is ignored per semver.
 func splitSemver(v string) (string, string) {
 	if i := strings.IndexByte(v, '+'); i >= 0 {
 		v = v[:i]
@@ -376,18 +412,21 @@ func compareNumericDots(a, b string) int {
 // dpkg (deb) ordering: [epoch:]upstream[-revision], '~' sorts first
 // ---------------------------------------------------------------------------
 
+// debCompare delegates to the pkgversion package's Debian backend: a
+// strict Debian-policy parser plus dpkg's exact comparison algorithm,
+// with digit runs compared as strings so numeric components of any
+// length stay overflow-free (the previous in-house implementation used
+// strconv.Atoi and silently clamped 20+ digit runs into misorders).
+// Malformed versions carry no trustworthy ordering: they are reported
+// as incomparable (2) under the package-wide "never pretend" rule
+// instead of being ordered by accident.
 func debCompare(a, b string) int {
-	ea, ra := splitEpoch(a)
-	eb, rb := splitEpoch(b)
-	if r := cmpInt(ea, eb); r != 0 {
-		return r
+	pa, errA := pkgversion.ParseDebVersion(a)
+	pb, errB := pkgversion.ParseDebVersion(b)
+	if errA != nil || errB != nil {
+		return 2
 	}
-	ua, va := splitDebRevision(ra)
-	ub, vb := splitDebRevision(rb)
-	if r := debFragment(ua, ub); r != 0 {
-		return r
-	}
-	return debFragment(va, vb)
+	return pkgversion.CompareDebParsed(pa, pb)
 }
 
 // splitEpoch handles the shared "[N:]..." epoch syntax of deb/rpm.
@@ -398,80 +437,6 @@ func splitEpoch(v string) (int, string) {
 		}
 	}
 	return 0, v
-}
-
-func splitDebRevision(v string) (string, string) {
-	if i := strings.LastIndexByte(v, '-'); i >= 0 {
-		return v[:i], v[i+1:]
-	}
-	return v, ""
-}
-
-// debChar is the dpkg character weight: '~' < end-of-string < alphanumerics
-// < punctuation. Digits never reach here (the outer loop splits them off).
-func debChar(c byte) int {
-	switch {
-	case c == '~':
-		return -1
-	case c == 0: // end-of-string sentinel
-		return 0
-	case isAlphaByte(c) || isDigitByte(c):
-		return int(c)
-	default:
-		return int(c) + 256
-	}
-}
-
-// debFragment implements the dpkg comparison algorithm verbatim: compare
-// non-digit runs by character weight, then digit runs numerically.
-func debFragment(a, b string) int {
-	i, j := 0, 0
-	for i < len(a) || j < len(b) {
-		// Non-digit prefixes first.
-		for (i < len(a) && !isDigitByte(a[i])) || (j < len(b) && !isDigitByte(b[j])) {
-			ca, cb := 0, 0
-			if i < len(a) {
-				ca = debChar(a[i])
-			}
-			if j < len(b) {
-				cb = debChar(b[j])
-			}
-			if ca != cb {
-				return cmpInt(ca, cb)
-			}
-			if i < len(a) {
-				i++
-			}
-			if j < len(b) {
-				j++
-			}
-		}
-		if i >= len(a) && j >= len(b) {
-			return 0
-		}
-		// Digit runs compare numerically (missing run = 0).
-		if (i < len(a) && isDigitByte(a[i])) || (j < len(b) && isDigitByte(b[j])) {
-			ni, nj := i, j
-			for ni < len(a) && isDigitByte(a[ni]) {
-				ni++
-			}
-			for nj < len(b) && isDigitByte(b[nj]) {
-				nj++
-			}
-			xa, xb := 0, 0
-			if ni > i {
-				xa, _ = strconv.Atoi(a[i:ni])
-			}
-			if nj > j {
-				xb, _ = strconv.Atoi(b[j:nj])
-			}
-			if xa != xb {
-				return cmpInt(xa, xb)
-			}
-			i, j = ni, nj
-		}
-	}
-	return 0
 }
 
 // ---------------------------------------------------------------------------

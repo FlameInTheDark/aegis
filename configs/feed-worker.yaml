@@ -3,7 +3,7 @@
 # ==============================================================================
 #
 # The feed-worker synchronizes external vulnerability intelligence into the
-# CVE store (spec §27-§36). It runs OUTSIDE user request paths; sync jobs are
+# CVE store. It runs OUTSIDE user request paths; sync jobs are
 # sequential per feed with retry/backoff, full bookkeeping in feed_sync_runs
 # and provenance for every ingested field. See docs/VULNERABILITY-FEEDS.md
 # for sources, licensing and outage semantics.
@@ -38,7 +38,7 @@ feeds:
   interval: 6h                             # AEGIS_FEEDS_INTERVAL
 
   # Per-feed overrides (optional). Endpoint URLs are FIXED by default — the
-  # feed-worker never fetches user-supplied URLs (SSRF hardening, spec §104).
+ # feed-worker never fetches user-supplied URLs (SSRF hardening).
   # Overriding an endpoint is an administrative action; treat the value as
   # code review-worthy.
   sources:

@@ -1,5 +1,5 @@
 // Package organizations implements org/site/network lifecycle and the
-// first-run bootstrap flow (spec §8, §159/§160).
+// first-run bootstrap flow.
 package organizations
 
 import (
@@ -33,7 +33,7 @@ type BootstrapResult struct {
 }
 
 // Bootstrap creates the initial organization, admin user and default site
-// when the installation is empty (spec §160 first run; credentials come
+// when the installation is empty (first run; credentials come
 // from configuration, never hardcoded).
 func (s *Service) Bootstrap(ctx context.Context, orgName, email, name, passwordHash string) (*BootstrapResult, error) {
 	existing, err := s.Users.ByEmail(ctx, email)
@@ -85,8 +85,33 @@ func (s *Service) CreateSite(ctx context.Context, orgID, name, siteType, descrip
 	return site, nil
 }
 
+// canonicalExposures mirrors the networks.exposure CHECK constraint
+// (migrations/postgres/0001_tenancy.up.sql): anything else is rejected here,
+// before it can reach the database as a 500.
+var canonicalExposures = map[string]bool{
+	string(domain.ExposureInternal): true, // internal_only
+	string(domain.ExposureVPN):      true, // vpn_only
+	string(domain.ExposurePublic):   true, // publicly_reachable
+	string(domain.ExposureUnknown):  true, // unknown
+}
+
+// normalizeExposure validates the requested network exposure against the
+// networks.exposure CHECK constraint (migrations/postgres/0001_tenancy.up.sql)
+// and defaults empty requests to internal_only. Anything else is rejected
+// here, before it can reach the database as a 500.
+func normalizeExposure(exposure string) (string, error) {
+	exposure = strings.TrimSpace(exposure)
+	if exposure == "" {
+		exposure = string(domain.ExposureInternal)
+	}
+	if !canonicalExposures[exposure] {
+		return "", fmt.Errorf("exposure must be one of internal_only, vpn_only, publicly_reachable, unknown (got %q)", exposure)
+	}
+	return exposure, nil
+}
+
 // CreateNetwork validates a CIDR within a site.
-func (s *Service) CreateNetwork(ctx context.Context, orgID, siteID, cidr, name, gateway string, vlanID *int) (*domain.Network, error) {
+func (s *Service) CreateNetwork(ctx context.Context, orgID, siteID, cidr, name, gateway, exposure string, vlanID *int) (*domain.Network, error) {
 	cidr = strings.TrimSpace(cidr)
 	if _, _, err := net.ParseCIDR(cidr); err != nil {
 		return nil, fmt.Errorf("network must be a valid CIDR (got %q)", cidr)
@@ -97,10 +122,14 @@ func (s *Service) CreateNetwork(ctx context.Context, orgID, siteID, cidr, name, 
 			return nil, fmt.Errorf("gateway must be a valid IP (got %q)", gateway)
 		}
 	}
+	exposure, err := normalizeExposure(exposure)
+	if err != nil {
+		return nil, err
+	}
 	net := &domain.Network{
 		ID: ids.New(), SiteID: siteID, OrganizationID: orgID,
 		CIDR: cidr, Name: name, Gateway: gateway, VLANID: vlanID,
-		Exposure: domain.ExposureInternal, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		Exposure: domain.Exposure(exposure), CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
 	}
 	if err := s.Networks.Create(ctx, net); err != nil {
 		return nil, err

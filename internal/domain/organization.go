@@ -96,16 +96,6 @@ type Network struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
-// EnrollmentToken is a one-time token used by agents to obtain a device certificate.
-type EnrollmentToken struct {
-	ID             string     `json:"id"`
-	OrganizationID string     `json:"organization_id"`
-	SiteID         string     `json:"site_id"`
-	TokenHash      string     `json:"-"`
-	Prefix         string     `json:"prefix"` // displayable prefix, e.g. aeg_1ab2
-	CreatedBy      string     `json:"created_by"`
-	CreatedAt      time.Time  `json:"created_at"`
-	ExpiresAt      time.Time  `json:"expires_at"`
-	UsedAt         *time.Time `json:"used_at,omitempty"`
-	Revoked        bool       `json:"revoked"`
-}
+// ConnectorEnrollToken (see connector.go) is the surviving one-time token
+// type: the unified connect flow. The old standalone agent enrollment
+// token was removed with the AgentService.Enroll protocol in v1.24.0.

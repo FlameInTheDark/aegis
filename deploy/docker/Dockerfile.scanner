@@ -25,7 +25,10 @@ COPY cmd/ cmd/
 COPY internal/ internal/
 COPY api/ api/
 COPY migrations/ migrations/
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/aegis-scanner ./cmd/scanner
+ARG AEGIS_VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags="-s -w -X main.scannerVersion=${AEGIS_VERSION}" \
+    -o /out/aegis-scanner ./cmd/scanner
 
 FROM alpine:3.20
 # traceroute lives in the community repo (enabled in the alpine image by

@@ -1,5 +1,5 @@
 // Package scanning contains the scan orchestrator and network scope
-// safety validation (spec §70/§71). Every scan must define explicit
+// safety validation. Every scan must define explicit
 // scope; the platform normalizes, validates and rejects dangerous or
 // invalid targets before a single packet is sent.
 package scanning
@@ -21,7 +21,7 @@ type ScopeValidation struct {
 	Errors         []string `json:"errors,omitempty"`
 }
 
-// maxScopeAddresses caps accidental huge scopes (spec §70: enforce max target counts).
+// maxScopeAddresses caps accidental huge scopes (enforce max target counts).
 const maxScopeAddresses = 262144 // /14-ish; hard ceiling, profiles cap lower
 
 var (
@@ -308,7 +308,7 @@ func parseRange(r string) (net.IP, net.IP, error) {
 }
 
 // isSuspiciousHostname rejects strings that should never reach a resolver
-// or a command line (SSRF/injection defense, spec §83).
+// or a command line (SSRF/injection defense).
 func isSuspiciousHostname(h string) bool {
 	if len(h) == 0 || len(h) > 253 {
 		return true

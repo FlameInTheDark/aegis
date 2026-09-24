@@ -4,11 +4,14 @@ import (
 	"time"
 )
 
-// Agent is a registered endpoint agent (device identity based).
+// Agent is a registered endpoint device, bound 1:1 to its agent-kind
+// connector (the connector owns identity/liveness; this record carries the
+// device facts, certificate metadata and inventory linkage).
 type Agent struct {
 	ID             string     `json:"id"`
 	OrganizationID string     `json:"organization_id"`
 	SiteID         string     `json:"site_id"`
+	ConnectorID    string     `json:"connector_id,omitempty"`
 	AssetID        *string    `json:"asset_id,omitempty"`
 	Hostname       string     `json:"hostname"`
 	Platform       string     `json:"platform"` // windows|linux|darwin
@@ -24,7 +27,7 @@ type Agent struct {
 	Revoked        bool       `json:"revoked"`
 }
 
-// AgentTask is a typed task assigned to an agent (spec §19).
+// AgentTask is a typed task assigned to an agent.
 // There is deliberately NO arbitrary shell execution capability.
 type AgentTaskType string
 
@@ -77,6 +80,7 @@ type SystemInventory struct {
 	MemoryTotal  uint64       `json:"memory_total,omitempty"`
 	SerialNumber string       `json:"serial_number,omitempty"`
 	MachineID    string       `json:"machine_id,omitempty"`
+	PrimaryIP    string       `json:"primary_ip,omitempty"`
 	Interfaces   []AgentIface `json:"interfaces,omitempty"`
 	Disks        []AgentDisk  `json:"disks,omitempty"`
 }
@@ -109,7 +113,7 @@ type Socket struct {
 	Process   string `json:"process,omitempty"`
 }
 
-// SecurityPosture is endpoint security state (spec §17).
+// SecurityPosture is endpoint security state.
 type SecurityPosture struct {
 	FirewallEnabled *bool    `json:"firewall_enabled,omitempty"`
 	FirewallProduct string   `json:"firewall_product,omitempty"`
@@ -122,7 +126,7 @@ type SecurityPosture struct {
 	LocalAdmins     []string `json:"local_admins,omitempty"`
 }
 
-// ProcessInfo is minimal process information (spec §17 limits).
+// ProcessInfo is minimal process information (limits).
 type ProcessInfo struct {
 	PID       int    `json:"pid"`
 	Name      string `json:"name"`

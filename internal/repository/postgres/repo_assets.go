@@ -23,11 +23,13 @@ device_type, os_family, os_name, os_version, kernel_version, architecture,
 os_confidence, os_sources, device_type_confidence, device_type_sources,
 exposure, criticality, risk_score, risk_explanation, has_agent, agent_id, tags, owner, notes,
 demo_source, first_seen, last_seen, updated_at,
+name_override, device_type_override, parent_override,
 -- The address this asset currently answers on, used for human-friendly
--- naming when no hostname is known ("Router · 192.168.1.1"). COALESCE:
--- pgx cannot scan NULL into a plain string.
+-- naming when no hostname is known ("Router · 192.168.1.1"). The
+-- highest-weighted address wins (an endpoint's reported management address
+-- outranks its other NICs), recency breaks ties between equal weights.
 COALESCE((SELECT i.value FROM asset_identifiers i WHERE i.asset_id = assets.id AND i.type = 'ip'
- ORDER BY i.created_at DESC LIMIT 1), '') AS primary_ip`
+ ORDER BY i.weight DESC, i.created_at DESC LIMIT 1), '') AS primary_ip`
 
 func scanAsset(row scanner) (*domain.Asset, error) {
 	var a domain.Asset
@@ -36,16 +38,27 @@ func scanAsset(row scanner) (*domain.Asset, error) {
 		&a.KernelVersion, &a.Architecture, &a.OSConfidence, &a.OSSources,
 		&a.DeviceTypeConf, &a.DeviceTypeSrcs, &a.Exposure, &a.Criticality, &a.RiskScore,
 		&a.RiskExplanation, &a.HasAgent, &a.AgentID, &a.Tags, &a.Owner, &a.Notes,
-		&a.DemoSource, &a.FirstSeen, &a.LastSeen, &a.UpdatedAt, &a.PrimaryIP)
+		&a.DemoSource, &a.FirstSeen, &a.LastSeen, &a.UpdatedAt,
+		&a.NameOverride, &a.TypeOverride, &a.ParentOverride, &a.PrimaryIP)
 	if err != nil {
 		return nil, mapNotFound(err)
+	}
+	// Apply analyst overrides onto the effective fields: every consumer
+	// (inventory, topology, search results) sees the corrected value,
+	// while the scanned columns stay untouched and the *_override fields
+	// still serialize so the UI can badge + reset. NULL = no override.
+	if a.NameOverride != nil && *a.NameOverride != "" {
+		a.Hostname = *a.NameOverride
+	}
+	if a.TypeOverride != nil && *a.TypeOverride != "" {
+		a.DeviceType = domain.DeviceType(*a.TypeOverride)
 	}
 	return &a, nil
 }
 
 type scanner interface{ Scan(dest ...any) error }
 
-// AssetFilter constrains asset list queries (spec §55, §118).
+// AssetFilter constrains asset list queries.
 type AssetFilter struct {
 	OrgID       string
 	SiteID      string
@@ -150,6 +163,29 @@ func (r *AssetRepo) List(ctx context.Context, f AssetFilter) ([]domain.Asset, in
 	return out, total, nil
 }
 
+// CountBySite returns asset counts per site id for the whole org — the
+// scope dropdown and sites table show them; one aggregate, no N+1.
+func (r *AssetRepo) CountBySite(ctx context.Context, orgID string) (map[string]int64, error) {
+	q := r.db.Select("site_id::text", "count(*)").From("assets").
+		Where(squirrel.Eq{"organization_id": orgID}).
+		GroupBy("site_id")
+	rows, err := r.db.Query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var sid string
+		var n int64
+		if err := rows.Scan(&sid, &n); err != nil {
+			return nil, err
+		}
+		out[sid] = n
+	}
+	return out, rows.Err()
+}
+
 // assetFilterWhere builds the shared WHERE clause for List and count so
 // filtered totals match the rows actually returned (a stale count showed
 // "N results" under every filter).
@@ -211,7 +247,7 @@ func escapeLike(s string) string {
 	return s
 }
 
-// Search performs global search across assets, services, software, CVEs (spec §67).
+// Search performs global search across assets, services, software, CVEs.
 func (r *AssetRepo) Search(ctx context.Context, orgID, term string, limit int) (*SearchResults, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 10
@@ -219,11 +255,13 @@ func (r *AssetRepo) Search(ctx context.Context, orgID, term string, limit int) (
 	pat := "%" + escapeLike(term) + "%"
 	res := &SearchResults{Query: term}
 
-	assetQ := r.db.Select("id, hostname, fqdn, device_type, site_id, risk_score").
+	assetQ := r.db.Select("id, COALESCE(name_override, hostname) AS hostname, fqdn, device_type, site_id, risk_score").
 		From("assets").
 		Where(squirrel.Eq{"organization_id": orgID}).
 		Where(squirrel.Or{
-			squirrel.ILike{"hostname": pat},
+			// COALESCE so an overridden asset matches on the name the
+			// operator actually sees now, not only the scanned one.
+			squirrel.Expr("COALESCE(name_override, hostname) ILIKE ?", pat),
 			squirrel.ILike{"fqdn": pat},
 			squirrel.ILike{"vendor": pat},
 			// Addresses are the number one thing an operator pastes
@@ -330,9 +368,10 @@ func (r *InterfaceRepo) Upsert(ctx context.Context, iface *domain.Interface) err
 		iface.ID = ids.New()
 	}
 	q := r.db.Insert("network_interfaces").
-		Columns("id", "asset_id", "mac", "name", "vlan_id", "mtu", "speed_mbps", "status").
-		Values(iface.ID, iface.AssetID, iface.MAC, iface.Name, iface.VLANID, iface.MTU, iface.SpeedMbps, iface.Status).
+		Columns("id", "asset_id", "mac", "vendor", "name", "vlan_id", "mtu", "speed_mbps", "status").
+		Values(iface.ID, iface.AssetID, iface.MAC, iface.Vendor, iface.Name, iface.VLANID, iface.MTU, iface.SpeedMbps, iface.Status).
 		Suffix(`ON CONFLICT (asset_id, mac) DO UPDATE SET name = COALESCE(NULLIF(EXCLUDED.name,''), network_interfaces.name),
+                        vendor = COALESCE(NULLIF(EXCLUDED.vendor,''), network_interfaces.vendor),
                         last_seen = now() RETURNING id`)
 	return r.db.QueryRow(ctx, q).Scan(&iface.ID)
 }
@@ -346,8 +385,26 @@ func (r *InterfaceRepo) AddIP(ctx context.Context, ifaceID, ip string, isPrimary
 	return err
 }
 
+// SetPrimaryIP makes `ip` the interface's single primary address: every
+// row of the interface is flagged by comparison, so exactly one row (the
+// one holding `ip`) is primary afterwards — previous flags and previous
+// multiple-primary states converge. An address recorded earlier as primary
+// keeps its flag when the primary selection moves; the flag column is a
+// derived view of "which address the UI displays", never authoritative
+// history. No-op on an empty ip.
+func (r *InterfaceRepo) SetPrimaryIP(ctx context.Context, ifaceID, ip string) error {
+	if ip == "" {
+		return nil
+	}
+	q := r.db.Update("ip_addresses").
+		Set("is_primary", squirrel.Expr("ip = ?", ip)).
+		Where(squirrel.Eq{"interface_id": ifaceID})
+	_, err := r.db.Exec(ctx, q)
+	return err
+}
+
 func (r *InterfaceRepo) ListForAsset(ctx context.Context, assetID string) ([]domain.Interface, error) {
-	q := r.db.Select("id, asset_id, mac, name, vlan_id, mtu, speed_mbps, status, first_seen, last_seen").
+	q := r.db.Select("id, asset_id, mac, vendor, name, vlan_id, mtu, speed_mbps, status, first_seen, last_seen").
 		From("network_interfaces").Where(squirrel.Eq{"asset_id": assetID})
 	rows, err := r.db.Query(ctx, q)
 	if err != nil {
@@ -357,11 +414,14 @@ func (r *InterfaceRepo) ListForAsset(ctx context.Context, assetID string) ([]dom
 	var out []domain.Interface
 	for rows.Next() {
 		var i domain.Interface
-		if err := rows.Scan(&i.ID, &i.AssetID, &i.MAC, &i.Name, &i.VLANID, &i.MTU, &i.SpeedMbps, &i.Status, &i.FirstSeen, &i.LastSeen); err != nil {
+		if err := rows.Scan(&i.ID, &i.AssetID, &i.MAC, &i.Vendor, &i.Name, &i.VLANID, &i.MTU, &i.SpeedMbps, &i.Status, &i.FirstSeen, &i.LastSeen); err != nil {
 			return nil, err
 		}
-		ipQ := r.db.Select("ip::text, is_primary, first_seen, last_seen").From("ip_addresses").
-			Where(squirrel.Eq{"interface_id": i.ID}).OrderBy("is_primary DESC")
+		ipQ := r.db.Select("host(ip) AS ip, is_primary, first_seen, last_seen").From("ip_addresses").
+			// Primary first, then stable insertion order (first_seen, ip) —
+			// without a secondary key the primary-selection fallback
+			// (addresses[0]) was nondeterministic between reads.
+			Where(squirrel.Eq{"interface_id": i.ID}).OrderBy("is_primary DESC", "first_seen ASC", "ip ASC")
 		ipRows, err := r.db.Query(ctx, ipQ)
 		if err != nil {
 			return nil, err
@@ -388,14 +448,14 @@ func NewServiceRepo(db *DB) *ServiceRepo { return &ServiceRepo{db: db} }
 
 const serviceCols = `id, asset_id, organization_id, protocol, port, service_name, product, vendor,
 detected_version, version_range, version_confidence, cpes, banner, tls, http, sources, confidence,
-exposure, flags, state, first_seen, last_seen`
+exposure, flags, state, first_seen, last_seen, version_norm`
 
 func scanService(row scanner) (*domain.Service, error) {
 	var s domain.Service
 	err := row.Scan(&s.ID, &s.AssetID, &s.OrganizationID, &s.Protocol, &s.Port,
 		&s.ServiceName, &s.Product, &s.Vendor, &s.DetectedVersion, &s.VersionRange,
 		&s.VersionConf, &s.CPEs, &s.Banner, &s.TLS, &s.HTTP, &s.Sources, &s.Confidence,
-		&s.Exposure, &s.Flags, &s.State, &s.FirstSeen, &s.LastSeen)
+		&s.Exposure, &s.Flags, &s.State, &s.FirstSeen, &s.LastSeen, &s.VersionNorm)
 	if err != nil {
 		return nil, mapNotFound(err)
 	}
@@ -409,10 +469,10 @@ func (r *ServiceRepo) Upsert(ctx context.Context, s *domain.Service) error {
 	q := r.db.Insert("services").
 		Columns("id", "asset_id", "organization_id", "protocol", "port", "service_name",
 			"product", "vendor", "detected_version", "version_range", "version_confidence",
-			"cpes", "banner", "tls", "http", "sources", "confidence", "exposure", "flags", "state").
+			"cpes", "banner", "tls", "http", "sources", "confidence", "exposure", "flags", "state", "version_norm").
 		Values(s.ID, s.AssetID, s.OrganizationID, s.Protocol, s.Port, s.ServiceName,
 			s.Product, s.Vendor, s.DetectedVersion, s.VersionRange, s.VersionConf,
-			nonNil(s.CPEs), s.Banner, s.TLS, s.HTTP, nonNil(s.Sources), s.Confidence, s.Exposure, nonNil(s.Flags), s.State).
+			nonNil(s.CPEs), s.Banner, s.TLS, s.HTTP, nonNil(s.Sources), s.Confidence, s.Exposure, nonNil(s.Flags), s.State, s.VersionNorm).
 		Suffix(`ON CONFLICT (asset_id, protocol, port) DO UPDATE SET
                         service_name = EXCLUDED.service_name,
                         product = EXCLUDED.product,
@@ -429,6 +489,7 @@ func (r *ServiceRepo) Upsert(ctx context.Context, s *domain.Service) error {
                         exposure = EXCLUDED.exposure,
                         flags = EXCLUDED.flags,
                         state = EXCLUDED.state,
+                        version_norm = EXCLUDED.version_norm,
                         last_seen = now()
                         RETURNING id, first_seen`)
 	return r.db.QueryRow(ctx, q).Scan(&s.ID, &s.FirstSeen)
@@ -580,15 +641,15 @@ func (r *SoftwareRepo) Upsert(ctx context.Context, s *domain.Software) error {
 		s.ID = ids.New()
 	}
 	q := r.db.Insert("software").
-		Columns("id", "asset_id", "name", "version", "vendor", "ecosystem", "purl", "cpes", "source").
-		Values(s.ID, s.AssetID, s.Name, s.Version, s.Vendor, s.Ecosystem, s.PURL, nonNil(s.CPEs), s.Source).
+		Columns("id", "asset_id", "name", "version", "version_norm", "vendor", "ecosystem", "purl", "cpes", "source").
+		Values(s.ID, s.AssetID, s.Name, s.Version, s.VersionNorm, s.Vendor, s.Ecosystem, s.PURL, nonNil(s.CPEs), s.Source).
 		Suffix(`ON CONFLICT (asset_id, name, version, ecosystem) DO UPDATE SET
-                        purl = EXCLUDED.purl, cpes = EXCLUDED.cpes, last_seen = now() RETURNING id`)
+                        version_norm = EXCLUDED.version_norm, purl = EXCLUDED.purl, cpes = EXCLUDED.cpes, last_seen = now() RETURNING id`)
 	return r.db.QueryRow(ctx, q).Scan(&s.ID)
 }
 
 func (r *SoftwareRepo) ListForAsset(ctx context.Context, assetID string) ([]domain.Software, error) {
-	q := r.db.Select("id, asset_id, name, version, vendor, ecosystem, purl, cpes, source, first_seen, last_seen").
+	q := r.db.Select("id, asset_id, name, version, version_norm, vendor, ecosystem, purl, cpes, source, first_seen, last_seen").
 		From("software").Where(squirrel.Eq{"asset_id": assetID}).OrderBy("name")
 	rows, err := r.db.Query(ctx, q)
 	if err != nil {
@@ -598,7 +659,7 @@ func (r *SoftwareRepo) ListForAsset(ctx context.Context, assetID string) ([]doma
 	var out []domain.Software
 	for rows.Next() {
 		var s domain.Software
-		if err := rows.Scan(&s.ID, &s.AssetID, &s.Name, &s.Version, &s.Vendor, &s.Ecosystem,
+		if err := rows.Scan(&s.ID, &s.AssetID, &s.Name, &s.Version, &s.VersionNorm, &s.Vendor, &s.Ecosystem,
 			&s.PURL, &s.CPEs, &s.Source, &s.FirstSeen, &s.LastSeen); err != nil {
 			return nil, err
 		}
@@ -609,7 +670,7 @@ func (r *SoftwareRepo) ListForAsset(ctx context.Context, assetID string) ([]doma
 
 // AllPackages returns the full package inventory for matching pipelines.
 func (r *SoftwareRepo) AllPackages(ctx context.Context, orgID string) ([]domain.Software, error) {
-	q := r.db.Select("s.id, s.asset_id, s.name, s.version, s.vendor, s.ecosystem, s.purl, s.cpes, s.source, s.first_seen, s.last_seen").
+	q := r.db.Select("s.id, s.asset_id, s.name, s.version, s.version_norm, s.vendor, s.ecosystem, s.purl, s.cpes, s.source, s.first_seen, s.last_seen").
 		From("software s").
 		Join("assets a ON a.id = s.asset_id").
 		Where(squirrel.Eq{"a.organization_id": orgID})
@@ -621,7 +682,7 @@ func (r *SoftwareRepo) AllPackages(ctx context.Context, orgID string) ([]domain.
 	var out []domain.Software
 	for rows.Next() {
 		var s domain.Software
-		if err := rows.Scan(&s.ID, &s.AssetID, &s.Name, &s.Version, &s.Vendor, &s.Ecosystem,
+		if err := rows.Scan(&s.ID, &s.AssetID, &s.Name, &s.Version, &s.VersionNorm, &s.Vendor, &s.Ecosystem,
 			&s.PURL, &s.CPEs, &s.Source, &s.FirstSeen, &s.LastSeen); err != nil {
 			return nil, err
 		}

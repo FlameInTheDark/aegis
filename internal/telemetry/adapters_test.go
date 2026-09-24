@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// Fixture-driven adapter tests (spec §108): normalization, timestamps,
+// Fixture-driven adapter tests: normalization, timestamps,
 // IP parsing, unknown/missing fields — using synthetic files in testdata.
 func load(t *testing.T, name string) []byte {
 	t.Helper()

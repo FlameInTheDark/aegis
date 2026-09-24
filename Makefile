@@ -3,24 +3,32 @@ SHELL := /bin/bash
 GO    ?= go
 NODE  ?= npm
 
-# Release version: VERSION file first (works in exported archives without
-# git metadata), then git describe, then dev.
-VERSION ?= $(shell cat VERSION 2>/dev/null || git describe --tags --always --dirty 2>/dev/null || echo dev)
+# Release version: git tags are the single source of truth (semantic-release
+# cuts them from conventional commits). Override explicitly for local tests.
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
-LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT)
+# Version stamping must cover EVERY var a component reports at runtime:
+#   main.version            - cmd/server, cmd/worker, cmd/feed-worker, cmd/connector (cli flag)
+#   main.scannerVersion     - cmd/scanner (scanners row version)
+#   connectorapp.Version    - aegis-connector runtime (registrations + heartbeats)
+#   endpoint.AgentVersion   - cert-based endpoint agent
+LDFLAGS := -s -w -X main.version=$(VERSION) -X main.commit=$(COMMIT) \
+  -X main.scannerVersion=$(VERSION) \
+  -X github.com/FlameInTheDark/aegis/internal/connectorapp.Version=$(VERSION) \
+  -X github.com/FlameInTheDark/aegis/internal/endpoint.AgentVersion=$(VERSION)
 
 -include .env
 export
 
 COMPOSE := docker compose -f deploy/compose/docker-compose.yml
 
-.PHONY: help dev dev-hybrid down logs ps build docker test lint fmt generate swagger proto migrate-up migrate-down migrate-version seed e2e clean run-server run-worker run-scanner run-feed-worker
+.PHONY: help dev dev-hybrid down logs ps build docker test lint fmt generate proto migrate-up migrate-down migrate-version seed e2e clean run-server run-worker run-scanner run-feed-worker run-connector
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 
 dev: ## Start the FULL stack in docker compose (build images + run everything)
-	$(COMPOSE) up -d --build
+	AEGIS_VERSION=$(VERSION) $(COMPOSE) up -d --build
 	@echo ""
 	@echo "Full stack is starting (first image build takes a few minutes):"
 	@echo "  UI     http://localhost:3000   (admin@aegis.local / aegis-demo-admin-2026)"
@@ -45,17 +53,18 @@ build: ## Build all Go binaries into ./bin
 	$(GO) build -ldflags '$(LDFLAGS)' -o bin/aegis-server      ./cmd/server
 	$(GO) build -ldflags '$(LDFLAGS)' -o bin/aegis-worker      ./cmd/worker
 	$(GO) build -ldflags '$(LDFLAGS)' -o bin/aegis-scanner     ./cmd/scanner
-	$(GO) build -ldflags '$(LDFLAGS)' -o bin/aegis-agent       ./cmd/agent
 	$(GO) build -ldflags '$(LDFLAGS)' -o bin/aegis-feed-worker ./cmd/feed-worker
+	$(GO) build -ldflags '$(LDFLAGS)' -o bin/aegis-connector  ./cmd/connector
 
 docker: ## Build all service images
-	$(COMPOSE) build
+	AEGIS_VERSION=$(VERSION) $(COMPOSE) build
 
 test: ## Run Go tests
 	$(GO) test ./... -race -count=1
 
-test-frontend: ## Run frontend tests
-	cd web && $(NODE) run test 2>/dev/null || echo "no frontend tests configured"
+test-frontend: ## Build the SPA and run the Playwright browser suites
+	cd web && $(NODE) run build
+	cd web && $(NODE) run test:e2e
 
 lint: ## Lint Go (gofmt + vet) and frontend
 	@go build ./...
@@ -67,11 +76,7 @@ fmt: ## Format Go code
 	$(GO) fmt ./...
 	gofumpt -w -l .
 
-generate: swagger proto ## Regenerate all generated code
-
-swagger: ## Generate Swagger/OpenAPI docs (fails CI when stale)
-	swag init -g cmd/server/main.go -o api/swagger --parseDependency --parseInternal
-	@echo "If api/swagger changed, commit it. CI fails when generated docs are stale."
+generate: proto ## Regenerate generated code (protobuf/gRPC via buf)
 
 proto: ## Generate protobuf/gRPC code for the agent protocol
 	cd api/proto && buf generate
@@ -88,8 +93,11 @@ migrate-version: ## Show current schema version
 seed: ## Print instructions + apply demo seed data
 	$(GO) run ./scripts/seed
 
-e2e: ## Run end-to-end smoke test against a running stack
-	$(GO) test ./tests/e2e/... -tags e2e -count=1
+e2e: ## Run the end-to-end verification suites (boot their own sandbox: postgres + nats + stubs; see scripts/)
+	bash scripts/e2e-features.sh
+	bash scripts/e2e-connectors.sh
+	bash scripts/e2e-repro-bugs.sh
+	bash scripts/repro-auth.sh
 
 clean: ## Remove build artifacts
 	rm -rf bin dist
@@ -127,3 +135,6 @@ run-scanner: ## Run aegis-scanner against the docker data layer
 
 run-feed-worker: ## Run aegis-feed-worker against the docker data layer
 	$(AEGIS_DEV_ENV) ./bin/aegis-feed-worker
+
+run-connector: ## Run aegis-connector (enroll: make run-connector ARGS="--connect host:9090/<token>")
+	./bin/aegis-connector $(ARGS)

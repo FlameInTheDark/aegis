@@ -16,7 +16,7 @@ import (
 type chEventFilter = ch.EventFilter
 
 // ---------------------------------------------------------------------------
-// Detections (§40/§41/§61)
+// Detections
 
 func (a *App) handleListRules(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
@@ -82,9 +82,39 @@ func (a *App) handleListMatches(c *fiber.Ctx) error {
 }
 
 // ---------------------------------------------------------------------------
-// Events (§22/§60)
+// Events
 
-// handleListEvents is a cursor-paginated event explorer backed by ClickHouse.
+// handleUpdateMatchStatus PATCH /detections/matches/:id — analyst triage
+// (new → investigating → contained/closed). The workflow state is persisted
+// on the match row and audited; anyone without finding:write (viewer,
+// operator) cannot move matches.
+func (a *App) handleUpdateMatchStatus(c *fiber.Ctx) error {
+	claims := a.claimsFrom(c)
+	if he := a.requirePerm(c, domain.PermFindingWrite); he != nil {
+		return he
+	}
+	var req struct {
+		Status string `json:"status"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return BadRequest("invalid request body")
+	}
+	if !domain.ValidMatchStatus(req.Status) {
+		return BadRequest("status must be one of: new, investigating, contained, closed")
+	}
+	if err := a.svc.Matches.SetStatus(Context(c), claims.OrganizationID, c.Params("id"), domain.MatchStatus(req.Status)); err != nil {
+		if err == pg.ErrNotFound {
+			return NotFound("match not found")
+		}
+		return Internal("match status update failed")
+	}
+	a.svc.AuditService.Entry(Context(c), claims.OrganizationID, claims.Subject,
+		"detection.match_status", "match:"+c.Params("id"), c.IP(), "", "success",
+		map[string]any{"status": req.Status})
+	return c.JSON(fiber.Map{"id": c.Params("id"), "status": req.Status})
+}
+
+// handleListEvents lists the raw security-event stream
 func (a *App) handleListEvents(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
 	if he := a.requirePerm(c, domain.PermEventRead); he != nil {
@@ -161,7 +191,7 @@ func splitCursor(cur string) []string {
 	return out
 }
 
-// handleIngestEvent accepts a sensor/agent push with dedup and caps (§104).
+// handleIngestEvent accepts a sensor/agent push with dedup and caps.
 func (a *App) handleIngestEvent(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
 	if he := a.requirePerm(c, domain.PermEventRead); he != nil {
@@ -172,7 +202,7 @@ func (a *App) handleIngestEvent(c *fiber.Ctx) error {
 		return BadRequest("source and raw payload are required")
 	}
 	if req.TenantID == "" || req.TenantID != claims.OrganizationID {
-		// Tenant isolation: sensors may only push into their own org (§84).
+		// Tenant isolation: sensors may only push into their own org.
 		req.TenantID = claims.OrganizationID
 	}
 	accepted, err := a.svc.Ingestor.HTTPIngest(Context(c), req)

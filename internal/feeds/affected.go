@@ -1,6 +1,6 @@
 // affected.go turns CVE List v5 "affected" statements into stored display
 // data (domain.AffectedProduct) and into machine-matchable CPE matches
-// with correct per-range version bounds (spec §32).
+// with correct per-range version bounds.
 //
 // The subtleties this file exists for — everything the naive "take
 // lessThan and call it a day" approach gets wrong:

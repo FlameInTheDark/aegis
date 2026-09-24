@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -123,15 +124,23 @@ func TestTracepathTracerouteWithFakeBinary(t *testing.T) {
 	}
 	t.Setenv("AEGIS_SCANNER_TRACEPATH_PATH", fake)
 
-	hops, ok := tracepathTraceroute(t.Context(), "1.1.1.1", DefaultLimits())
+	tr, ok := tracepathTraceroute(t.Context(), "1.1.1.1", DefaultLimits())
 	if !ok {
 		t.Fatal("fallback reported not-ok for a working binary")
 	}
-	if len(hops) != 2 {
-		t.Fatalf("want 2 hops, got %+v", hops)
+	if len(tr.Hops) != 2 {
+		t.Fatalf("want 2 hops, got %+v", tr.Hops)
 	}
-	if hops[0].IP != "192.168.65.1" || hops[1].IP != "1.1.1.1" {
-		t.Errorf("hops = %+v", hops)
+	if tr.Hops[0].IP != "192.168.65.1" || tr.Hops[1].IP != "1.1.1.1" {
+		t.Errorf("hops = %+v", tr.Hops)
+	}
+	// v1.5.6: the trace must carry the probe family and the RAW text the
+	// binary printed — the asset trace view stores and displays both.
+	if tr.Method != "tracepath" {
+		t.Errorf("method = %q, want tracepath", tr.Method)
+	}
+	if !strings.Contains(tr.Raw, "192.168.65.1") || !strings.Contains(tr.Raw, "Resume: pmtu") {
+		t.Errorf("raw output not captured: %q", tr.Raw)
 	}
 	// Non-IPv4 targets are refused (nmap attempts cover v6).
 	if _, ok := tracepathTraceroute(t.Context(), "2001:db8::1", DefaultLimits()); ok {

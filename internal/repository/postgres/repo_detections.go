@@ -137,8 +137,25 @@ type MatchFilter struct {
 	OrgID  string
 	RuleID string
 	Level  string
+	Status string
 	Limit  int
 	Page   int
+}
+
+// SetStatus moves a match through the triage workflow; returns
+// ErrNotFound when the row (org-scoped) does not exist.
+func (r *MatchRepo) SetStatus(ctx context.Context, orgID, id string, status domain.MatchStatus) error {
+	q := r.db.Update("detection_matches").
+		Set("status", string(status)).
+		Where(squirrel.Eq{"id": id, "organization_id": orgID})
+	cmd, err := r.db.Exec(ctx, q)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (r *MatchRepo) List(ctx context.Context, f MatchFilter) ([]domain.DetectionMatch, int64, error) {
@@ -155,8 +172,11 @@ func (r *MatchRepo) List(ctx context.Context, f MatchFilter) ([]domain.Detection
 	if f.Level != "" {
 		where["level"] = f.Level
 	}
+	if f.Status != "" {
+		where["status"] = f.Status
+	}
 	q := r.db.Select(`id, organization_id, rule_id::text, rule_title, level, COALESCE(site_id::text,'') AS site_id,
-                COALESCE(asset_id::text,'') AS asset_id, COALESCE(src_ip::text,'') AS src_ip, entity, summary, event_ids, count, timeline, timestamp`).
+                COALESCE(asset_id::text,'') AS asset_id, COALESCE(src_ip::text,'') AS src_ip, entity, summary, event_ids, count, timeline, timestamp, status`).
 		From("detection_matches").Where(where)
 	var total int64
 	// count must be its own query: appending count(*) to the column list
@@ -176,7 +196,7 @@ func (r *MatchRepo) List(ctx context.Context, f MatchFilter) ([]domain.Detection
 		var m domain.DetectionMatch
 		if err := rows.Scan(&m.ID, &m.OrgID, &m.RuleID, &m.RuleTitle, &m.Level, &m.SiteID,
 			&m.AssetID, &m.SrcIP, &m.Entity, &m.Summary, &m.Events, &m.Count, &m.Timeline,
-			&m.Timestamp); err != nil {
+			&m.Timestamp, &m.Status); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, m)

@@ -22,7 +22,7 @@ type VulnRepo struct{ db *DB }
 func NewVulnRepo(db *DB) *VulnRepo { return &VulnRepo{db: db} }
 
 // UpsertCVE preserves provenance and never silently overwrites upstream data
-// without bumping source_version (spec §29).
+// without bumping source_version.
 func (r *VulnRepo) UpsertCVE(ctx context.Context, v *domain.Vulnerability) error {
 	q := r.db.Insert("vulnerabilities").
 		Columns("cve_id", "state", "published_at", "updated_at", "description",
@@ -482,7 +482,47 @@ func (r *FeedRepo) Sources(ctx context.Context) ([]domain.FeedSource, error) {
 		}
 		out = append(out, f)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// records_total is the live count of what each feed owns in the local
+	// index — read from the tables the feed writes, never accumulated from
+	// sync runs. records_ingested is the LAST RUN's processed counter (KEV
+	// re-processes its ~1.7k catalog every tick), so it must never be
+	// presented as the size of a 79k-record vulnerability index.
+	counts, cerr := r.feedRecordTotals(ctx)
+	if cerr == nil {
+		for i := range out {
+			out[i].RecordsTotal = int(counts[out[i].Name])
+		}
+	}
+	return out, nil
+}
+
+// feedRecordTotals counts, in one round-trip, the rows each known feed owns
+// in the tables it writes. Feeds without a table here map to 0.
+func (r *FeedRepo) feedRecordTotals(ctx context.Context) (map[string]int64, error) {
+	sql := `SELECT
+		(SELECT COUNT(*) FROM vulnerability_kev),
+		(SELECT COUNT(DISTINCT cve_id) FROM vulnerability_epss),
+		(SELECT COUNT(*) FROM vulnerabilities WHERE source = 'nvd'),
+		(SELECT COUNT(*) FROM vulnerabilities WHERE source = 'cvelistv5'),
+		(SELECT COUNT(*) FROM osv_records),
+		(SELECT COUNT(*) FROM os_advisories),
+		(SELECT COUNT(*) FROM vulnerability_sources WHERE source = 'vulnrichment')`
+	var kev, epss, nvd, cvelist, osv, advisories, vulnrich int64
+	if err := r.db.QueryRowSQL(ctx, sql).Scan(&kev, &epss, &nvd, &cvelist, &osv, &advisories, &vulnrich); err != nil {
+		return nil, err
+	}
+	return map[string]int64{
+		"kev":          kev,
+		"epss":         epss,
+		"nvd":          nvd,
+		"cvelistv5":    cvelist,
+		"osv":          osv,
+		"advisories":   advisories,
+		"vulnrichment": vulnrich,
+	}, nil
 }
 
 func (r *FeedRepo) SetEnabled(ctx context.Context, name string, enabled bool) error {
@@ -623,10 +663,11 @@ type VulnListRow struct {
 	KnownExploited bool       `json:"known_exploited"`
 	AffectedAssets int64      `json:"affected_assets"`
 	OpenFindings   int64      `json:"open_findings"`
+	Source         string     `json:"source"`
 }
 
 // ListVulns returns a page of the local vulnerability index enriched with
-// KEV state and per-org affected-asset counts (§58 columns).
+// KEV state and per-org affected-asset counts (columns).
 func (r *VulnRepo) ListVulns(ctx context.Context, orgID string, f VulnListFilter) (struct {
 	Items []VulnListRow `json:"items"`
 	Total int64         `json:"total"`
@@ -684,6 +725,7 @@ func (r *VulnRepo) ListVulns(ctx context.Context, orgID string, f VulnListFilter
 		"CASE WHEN k.cve_id IS NULL THEN false ELSE true END AS known_exploited",
 		"COALESCE(fc.affected, 0) AS affected_assets",
 		"COALESCE(fc.open_findings, 0) AS open_findings",
+		"v.source",
 	).From("vulnerabilities v").
 		LeftJoin("vulnerability_kev k ON k.cve_id = v.cve_id").
 		LeftJoin("(SELECT cve_id, count(DISTINCT asset_id) AS affected, count(*) FILTER (WHERE status IN ('open','acknowledged','in_progress')) AS open_findings FROM findings WHERE organization_id = ? GROUP BY cve_id) fc ON fc.cve_id = v.cve_id", orgID)
@@ -724,7 +766,7 @@ func (r *VulnRepo) ListVulns(ctx context.Context, orgID string, f VulnListFilter
 	for rows.Next() {
 		var row VulnListRow
 		if err := rows.Scan(&row.CVEID, &row.State, &row.Description, &row.PublishedAt, &row.UpdatedAt,
-			&row.CVSSScore, &row.CVSSVector, &row.KnownExploited, &row.AffectedAssets, &row.OpenFindings); err == nil {
+			&row.CVSSScore, &row.CVSSVector, &row.KnownExploited, &row.AffectedAssets, &row.OpenFindings, &row.Source); err == nil {
 			out.Items = append(out.Items, row)
 		}
 	}
@@ -768,6 +810,26 @@ func (r *VulnRepo) ListVulns(ctx context.Context, orgID string, f VulnListFilter
 // never dominate a "newest first" view. Every returned string is composed
 // from fixed literals — user input only selects between them.
 func vulnOrderClause(sort, order string) string {
+	// Normalize case and the UI's friendly aliases ("published", "name",
+	// "cvss", "kev") onto the whitelist keys - the browser sent exactly
+	// those spellings, every option missed the whitelist and silently
+	// degraded to the default clause, so sorting appeared dead. Unknown
+	// keys keep their value, miss every case below and still land on
+	// the default relevance order; user input never reaches SQL.
+	switch strings.ToLower(strings.TrimSpace(sort)) {
+	case "published":
+		sort = "published_at"
+	case "updated":
+		sort = "updated_at"
+	case "name":
+		sort = "cve_id"
+	case "cvss":
+		sort = "cvss_score"
+	case "kev":
+		sort = "known_exploited"
+	default:
+		sort = strings.ToLower(strings.TrimSpace(sort))
+	}
 	dir := "DESC"
 	if strings.EqualFold(order, "asc") {
 		dir = "ASC"

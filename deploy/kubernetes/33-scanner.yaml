@@ -1,4 +1,4 @@
-# Scanner workload (spec §88/§89): NET_RAW is the only added capability,
+# Scanner workload: NET_RAW is the only added capability,
 # never privileged. hostNetwork only when scanning the node's own network
 # segment and the node is dedicated/isolated.
 apiVersion: apps/v1

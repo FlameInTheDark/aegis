@@ -19,29 +19,57 @@ func NewAgentRepo(db *DB) *AgentRepo { return &AgentRepo{db: db} }
 
 const agentCols = `id, organization_id, COALESCE(site_id::text,'') AS site_id, asset_id::text, hostname, platform,
 platform_version, arch, agent_version, status, cert_serial, cert_not_after, capabilities,
+COALESCE(connector_id::text,'') AS connector_id,
 last_seen, enrolled_at, revoked`
 
 func scanAgent(row scanner) (*domain.Agent, error) {
 	var a domain.Agent
 	err := row.Scan(&a.ID, &a.OrganizationID, &a.SiteID, &a.AssetID, &a.Hostname, &a.Platform,
 		&a.PlatformVer, &a.Arch, &a.AgentVersion, &a.Status, &a.CertSerial, &a.CertNotAfter,
-		&a.Capabilities, &a.LastSeen, &a.EnrolledAt, &a.Revoked)
+		&a.Capabilities, &a.ConnectorID, &a.LastSeen, &a.EnrolledAt, &a.Revoked)
 	if err != nil {
 		return nil, mapNotFound(err)
 	}
 	return &a, nil
 }
 
-// Enroll creates the agent record after successful certificate issuance.
+// Enroll creates the device record after successful certificate issuance.
+// connector_id binds it 1:1 to the agent-kind connector that owns it.
 func (r *AgentRepo) Enroll(ctx context.Context, a *domain.Agent) error {
 	if a.ID == "" {
 		a.ID = ids.New()
 	}
 	q := r.db.Insert("agents").
-		Columns("id", "organization_id", "site_id", "hostname", "platform", "platform_version",
+		Columns("id", "organization_id", "site_id", "connector_id", "hostname", "platform", "platform_version",
 			"arch", "agent_version", "status", "cert_serial", "cert_not_after", "capabilities").
-		Values(a.ID, a.OrganizationID, nullStr(a.SiteID), a.Hostname, a.Platform,
+		Values(a.ID, a.OrganizationID, nullStr(a.SiteID), nullStr(a.ConnectorID), a.Hostname, a.Platform,
 			a.PlatformVer, a.Arch, a.AgentVersion, "online", a.CertSerial, a.CertNotAfter, nonNil(a.Capabilities))
+	_, err := r.db.Exec(ctx, q)
+	return err
+}
+
+// ByConnector returns the device record bound to a connector (nil-site and
+// revoked rows included: binding is the identity, not the lifecycle).
+func (r *AgentRepo) ByConnector(ctx context.Context, connectorID string) (*domain.Agent, error) {
+	q := r.db.Select(agentCols).From("agents").
+		Where(squirrel.Eq{"connector_id": connectorID})
+	return scanAgent(r.db.QueryRow(ctx, q))
+}
+
+// UpdateDevice refreshes the bound device's identity fields after a
+// BindDevice call (re-enrollment of the same endpoint).
+func (r *AgentRepo) UpdateDevice(ctx context.Context, a *domain.Agent) error {
+	q := r.db.Update("agents").
+		Set("hostname", a.Hostname).
+		Set("platform", a.Platform).
+		Set("platform_version", a.PlatformVer).
+		Set("arch", a.Arch).
+		Set("agent_version", a.AgentVersion).
+		Set("cert_serial", a.CertSerial).
+		Set("cert_not_after", a.CertNotAfter).
+		Set("status", "online").
+		Set("last_seen", time.Now().UTC()).
+		Where(squirrel.Eq{"id": a.ID})
 	_, err := r.db.Exec(ctx, q)
 	return err
 }
@@ -49,6 +77,16 @@ func (r *AgentRepo) Enroll(ctx context.Context, a *domain.Agent) error {
 func (r *AgentRepo) ByID(ctx context.Context, orgID, id string) (*domain.Agent, error) {
 	q := r.db.Select(agentCols).From("agents").
 		Where(squirrel.Eq{"id": id, "organization_id": orgID})
+	return scanAgent(r.db.QueryRow(ctx, q))
+}
+
+// ByIDAnyOrg resolves a device by id alone. For server-internal callers
+// that already authenticated the request (connector credentials -> bound
+// device), so re-checking the org would only duplicate the transport's
+// work — and callers without an org id on the wire MUST use this variant.
+func (r *AgentRepo) ByIDAnyOrg(ctx context.Context, id string) (*domain.Agent, error) {
+	q := r.db.Select(agentCols).From("agents").
+		Where(squirrel.Eq{"id": id})
 	return scanAgent(r.db.QueryRow(ctx, q))
 }
 
@@ -108,6 +146,27 @@ func (r *AgentRepo) LinkAsset(ctx context.Context, agentID, assetID string) erro
 	q := r.db.Update("agents").Set("asset_id", assetID).Where(squirrel.Eq{"id": agentID})
 	_, err := r.db.Exec(ctx, q)
 	return err
+}
+
+// AgentIDsForAsset lists the devices bound to an asset. Identity adoption
+// uses it to skip assets another device already claims: two machines
+// reporting the same address must not fight over one asset.
+func (r *AgentRepo) AgentIDsForAsset(ctx context.Context, assetID string) ([]string, error) {
+	q := r.db.Select("id").From("agents").Where(squirrel.Eq{"asset_id": assetID})
+	rows, err := r.db.Query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 // ==================================================================== agent tasks
@@ -193,72 +252,6 @@ func (r *AgentTaskRepo) ListForAgent(ctx context.Context, agentID string, limit 
 		var t domain.AgentTask
 		if err := rows.Scan(&t.ID, &t.AgentID, &t.Type, &t.IssuedBy, &t.IssuedAt,
 			&t.ExpiresAt, &t.Args, &t.State, &t.Result, &t.Error); err != nil {
-			return nil, err
-		}
-		out = append(out, t)
-	}
-	return out, rows.Err()
-}
-
-// ==================================================================== enrollment tokens
-
-type EnrollmentRepo struct{ db *DB }
-
-func NewEnrollmentRepo(db *DB) *EnrollmentRepo { return &EnrollmentRepo{db: db} }
-
-func (r *EnrollmentRepo) Create(ctx context.Context, t *domain.EnrollmentToken) error {
-	if t.ID == "" {
-		t.ID = ids.New()
-	}
-	q := r.db.Insert("enrollment_tokens").
-		Columns("id", "organization_id", "site_id", "token_hash", "prefix", "created_by", "expires_at").
-		Values(t.ID, t.OrganizationID, t.SiteID, t.TokenHash, t.Prefix, t.CreatedBy, t.ExpiresAt)
-	_, err := r.db.Exec(ctx, q)
-	return err
-}
-
-// ByHash returns a valid, unused token for enrollment.
-func (r *EnrollmentRepo) ByHash(ctx context.Context, hash string) (*domain.EnrollmentToken, error) {
-	q := r.db.Select("id, organization_id, COALESCE(site_id::text,'') AS site_id, token_hash, prefix, COALESCE(created_by::text,'') AS created_by, created_at, expires_at, used_at, revoked").
-		From("enrollment_tokens").Where(squirrel.Eq{"token_hash": hash})
-	var t domain.EnrollmentToken
-	err := r.db.QueryRow(ctx, q).Scan(&t.ID, &t.OrganizationID, &t.SiteID, &t.TokenHash,
-		&t.Prefix, &t.CreatedBy, &t.CreatedAt, &t.ExpiresAt, &t.UsedAt, &t.Revoked)
-	if err != nil {
-		return nil, mapNotFound(err)
-	}
-	return &t, nil
-}
-
-// MarkUsed makes the token single-use (spec §16).
-func (r *EnrollmentRepo) MarkUsed(ctx context.Context, id string) error {
-	q := r.db.Update("enrollment_tokens").Set("used_at", time.Now().UTC()).
-		Where(squirrel.Eq{"id": id})
-	_, err := r.db.Exec(ctx, q)
-	return err
-}
-
-func (r *EnrollmentRepo) Revoke(ctx context.Context, orgID, id string) error {
-	q := r.db.Update("enrollment_tokens").Set("revoked", true).
-		Where(squirrel.Eq{"id": id, "organization_id": orgID})
-	_, err := r.db.Exec(ctx, q)
-	return err
-}
-
-func (r *EnrollmentRepo) List(ctx context.Context, orgID string) ([]domain.EnrollmentToken, error) {
-	q := r.db.Select("id, organization_id, COALESCE(site_id::text,'') AS site_id, prefix, COALESCE(created_by::text,'') AS created_by, created_at, expires_at, used_at, revoked").
-		From("enrollment_tokens").Where(squirrel.Eq{"organization_id": orgID}).
-		OrderBy("created_at DESC")
-	rows, err := r.db.Query(ctx, q)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []domain.EnrollmentToken
-	for rows.Next() {
-		var t domain.EnrollmentToken
-		if err := rows.Scan(&t.ID, &t.OrganizationID, &t.SiteID, &t.Prefix, &t.CreatedBy,
-			&t.CreatedAt, &t.ExpiresAt, &t.UsedAt, &t.Revoked); err != nil {
 			return nil, err
 		}
 		out = append(out, t)

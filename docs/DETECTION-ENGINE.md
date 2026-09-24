@@ -1,4 +1,4 @@
-# Detection engine (spec §40–§41, §189)
+# Detection engine
 
 ## Rule types
 
@@ -9,19 +9,19 @@
 | `temporal` | ordered condition sequence in window | alert then new outbound TLS |
 | `entity_agg` | entity contacted N distinct values | 30 distinct peers on SMB in 5m = lateral movement |
 
-Conditions are typed field/operator/value matchers (`eq neq in gt gte lt lte contains regex exists`) over the normalized event envelope (spec §22) — including `payload_metadata` paths.
+Conditions are typed field/operator/value matchers (`eq neq in gt gte lt lte contains regex exists`) over the normalized event envelope — including `payload_metadata` paths.
 
-## Deduplication (§172)
+## Deduplication
 
 One match per `(rule, entity, window)` via Redis `SETNX` windows: 100 identical alerts in 30 seconds become **one incident with count=100**, not 100 notifications.
 
-## Sigma compatibility (§41)
+## Sigma compatibility
 
 Rules carry Sigma-style metadata (`title`, `id`, `status`, `author`, `references`, `tags`, `logsource`, `level`, `false_positives`) and the correlation concepts `value_count` / `temporal`. The internal AST is the source of truth; full Sigma import is a documented future step.
 
-## Baselines & anomalies (§189)
+## Baselines & anomalies
 
-Simple per-entity statistical baselines (mean/σ, sample-bounded) flag *rare behavior* — new peer, new port, volume spikes. An anomaly is always labeled an anomaly; the UI never presents it as confirmed malicious activity (§190 terminology).
+Simple per-entity statistical baselines (mean/σ, sample-bounded) flag *rare behavior* — new peer, new port, volume spikes. An anomaly is always labeled an anomaly; the UI never presents it as confirmed malicious activity (terminology).
 
 ## Built-in catalog
 

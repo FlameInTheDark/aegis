@@ -1,6 +1,6 @@
 # Test fixtures
 
-All data in this directory is **synthetic** and safe to commit (spec §105:
+All data in this directory is **synthetic** and safe to commit (:
 the test suite never touches arbitrary real networks). Fixtures mirror the
 real upstream schemas so adapter tests are faithful:
 

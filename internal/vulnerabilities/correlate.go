@@ -13,18 +13,36 @@ import (
 	"github.com/FlameInTheDark/aegis/internal/risk"
 )
 
-// Correlator runs the full pipeline (spec §72):
+// FindingStore persists findings (implemented by *pg.FindingRepo).
+type FindingStore interface {
+	Upsert(ctx context.Context, f *domain.Finding) error
+}
+
+// EvidenceStore persists evidence records (implemented by *pg.EvidenceRepo).
+type EvidenceStore interface {
+	Insert(ctx context.Context, e *domain.Evidence) error
+}
+
+// Correlator runs the full pipeline :
 // service -> fingerprint -> normalize -> CPE candidates -> local index
 // -> KEV/EPSS/CVSS -> environmental risk -> finding + evidence.
 type Correlator struct {
-	Index    Index
-	Findings *pg.FindingRepo
-	Evidence *pg.EvidenceRepo
+	Index Index
+	// Findings/Evidence are store interfaces so the correlator is unit-
+	// testable; *pg.FindingRepo/*pg.EvidenceRepo implement them.
+	Findings FindingStore
+	Evidence EvidenceStore
 	Assets   *pg.AssetRepo
 	Services *pg.ServiceRepo  // optional: enables SweepOrg/SweepAsset
 	Software *pg.SoftwareRepo // optional: enables software-row correlation
 	Matcher  *Matcher
 	Log      *slog.Logger
+	// Advisories is the distro advisory plane; optional.
+	// When nil, os_* packages fall through to the OSV path as before.
+	Advisories AdvisorySource
+	// DistroResolver overrides how an asset's distro segment is resolved
+	// (tests). Defaults to fingerprinting.DistroOf.
+	DistroResolver DistroResolver
 	// Now is overridable in tests.
 	Now func() time.Time
 }
@@ -35,13 +53,19 @@ func (c *Correlator) CorrelateService(ctx context.Context, orgID string, asset *
 	if c.Matcher == nil {
 		c.Matcher = &Matcher{Index: c.Index}
 	}
+	// CVE matching runs on the normalized service version when present:
+	// the raw banner string ("10.0p2 Ubuntu 5ubuntu5.4") is provenance,
+	// not an ordering input — version_norm is the grammar-canonical
+	// form the version ranges understand. Raw stays on the evidence
+	// chain via RawVersion.
 	in := MatchInput{
-		AssetID:   asset.ID,
-		ServiceID: svc.ID,
-		Vendor:    svc.Vendor,
-		Product:   svc.Product,
-		Version:   svc.DetectedVersion,
-		CPEs:      svc.CPEs,
+		AssetID:    asset.ID,
+		ServiceID:  svc.ID,
+		Vendor:     svc.Vendor,
+		Product:    svc.Product,
+		Version:    serviceMatchVersion(svc),
+		RawVersion: svc.DetectedVersion,
+		CPEs:       svc.CPEs,
 	}
 	if in.Product == "" {
 		in.Product = svc.ServiceName // weak, becomes heuristic-only
@@ -74,8 +98,32 @@ func (c *Correlator) CorrelateService(ctx context.Context, orgID string, asset *
 	return n, nil
 }
 
-// CorrelatePackage correlates one agent-reported software package (§72
-// endpoint path: package -> ecosystem -> OSV/CVE -> finding).
+// matchVersion returns the version CVE matching compares for a
+// software row: the ingestion-normalized form when present (scanner
+// noise stripped, canonical under the package grammar), the raw
+// collected string otherwise. Raw is never rewritten, so every source
+// keeps its exact dpkg/rpm/apk revision semantics on the row while
+// ordering decisions run on the normalized value.
+func matchVersion(sw *domain.Software) string {
+	if sw.VersionNorm != "" {
+		return sw.VersionNorm
+	}
+	return sw.Version
+}
+
+// serviceMatchVersion returns the version CVE matching compares for a
+// service row: the banner-normalized form when present ("10.0p2
+// Ubuntu 5ubuntu5.4" -> "10.0p2-5ubuntu5.4"), the raw detected
+// version otherwise. Same contract as matchVersion for software
+// rows: matching is normalized-first, evidence keeps the raw.
+func serviceMatchVersion(svc *domain.Service) string {
+	if svc.VersionNorm != "" {
+		return svc.VersionNorm
+	}
+	return svc.DetectedVersion
+}
+
+// CorrelatePackage correlates one agent-reported software package (endpoint path: package -> ecosystem -> OSV/CVE -> finding).
 func (c *Correlator) CorrelatePackage(ctx context.Context, orgID string, asset *domain.Asset, sw *domain.Software) (int, error) {
 	if sw.Ecosystem == "" || sw.Name == "" {
 		return 0, nil
@@ -83,7 +131,7 @@ func (c *Correlator) CorrelatePackage(ctx context.Context, orgID string, asset *
 	if c.Matcher == nil {
 		c.Matcher = &Matcher{Index: c.Index}
 	}
-	in := MatchInput{AssetID: asset.ID, SoftwareID: sw.ID, Ecosystem: sw.Ecosystem, PackageName: sw.Name, Version: sw.Version}
+	in := MatchInput{AssetID: asset.ID, SoftwareID: sw.ID, Ecosystem: sw.Ecosystem, PackageName: sw.Name, Version: matchVersion(sw), RawVersion: sw.Version}
 	matches, err := c.Matcher.Match(ctx, in)
 	if err != nil {
 		return 0, err
@@ -107,19 +155,30 @@ func (c *Correlator) CorrelatePackage(ctx context.Context, orgID string, asset *
 
 // CorrelateSoftware correlates one software-inventory row that carries a
 // product identity (vendor/product/version/CPEs — network fingerprints
-// recorded by the scanner) against the CPE index. Agent-reported packages
-// with an ecosystem route through CorrelatePackage/OSV instead.
+// recorded by the scanner) against the CPE index. OS packages route through
+// the distro advisory plane first (deterministic, confidence 1.0) and fall
+// back to the OSV path only when no advisory data covers the asset's
+// release; other ecosystems go to CorrelatePackage/OSV directly.
 func (c *Correlator) CorrelateSoftware(ctx context.Context, orgID string, asset *domain.Asset, sw *domain.Software) (int, error) {
 	if sw.Name == "" {
 		return 0, nil
 	}
 	if sw.Ecosystem != "" {
+		if isOSPackageEcosystem(sw.Ecosystem) && c.Advisories != nil {
+			n, handled, err := c.CorrelateOSPackage(ctx, orgID, asset, sw)
+			if err != nil {
+				c.Log.Warn("advisory correlation failed", "software", sw.ID, "err", err)
+			}
+			if handled {
+				return n, nil
+			}
+		}
 		return c.CorrelatePackage(ctx, orgID, asset, sw)
 	}
 	if c.Matcher == nil {
 		c.Matcher = &Matcher{Index: c.Index}
 	}
-	in := MatchInput{AssetID: asset.ID, SoftwareID: sw.ID, Vendor: sw.Vendor, Product: sw.Name, Version: sw.Version, CPEs: sw.CPEs}
+	in := MatchInput{AssetID: asset.ID, SoftwareID: sw.ID, Vendor: sw.Vendor, Product: sw.Name, Version: matchVersion(sw), RawVersion: sw.Version, CPEs: sw.CPEs}
 	matches, err := c.Matcher.Match(ctx, in)
 	if err != nil {
 		return 0, err
@@ -316,7 +375,7 @@ func (c *Correlator) upsertFinding(ctx context.Context, orgID string, asset *dom
 		CVEID: cveID, OSVID: osvID, Title: title,
 		MatchType: m.MatchType, Confidence: m.Confidence,
 		RiskScore: rr.Score, Severity: sev, Status: domain.FindingOpen,
-		Remediation: remediationFor(vuln, svc),
+		Remediation: firstNonEmptyStr(m.Remediation, remediationFor(vuln, svc)),
 		FirstSeen:   c.now(), LastSeen: c.now(),
 		CreatedAt: c.now(), UpdatedAt: c.now(),
 	}
@@ -324,7 +383,7 @@ func (c *Correlator) upsertFinding(ctx context.Context, orgID string, asset *dom
 		return false, err
 	}
 
-	// Evidence chain (spec §73): structured, not just a sentence.
+	// Evidence chain: structured, not just a sentence.
 	evs := []domain.Evidence{{
 		ID: ids.New(), FindingID: f.ID, Kind: evidenceKind(m.MatchType),
 		Statement: m.Reason, Detail: m.Evidence, Source: domain.SourceHeuristic, CreatedAt: c.now(),
@@ -341,10 +400,19 @@ func (c *Correlator) upsertFinding(ctx context.Context, orgID string, asset *dom
 		_ = c.Evidence.Insert(ctx, &ev)
 	}
 
-	// Explanation requirement (§37): store a transparent reason on the asset
+	// Explanation requirement: store a transparent reason on the asset
 	// risk roll-up happens in the worker; here we log for ops.
 	c.Log.Debug("finding scored", "cve", cveID, "risk", rr.Score, "explain", risk.Explain(rr))
 	return true, nil
+}
+
+func firstNonEmptyStr(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func titleFor(m Match, vuln *domain.Vulnerability) string {
@@ -379,8 +447,10 @@ func evidenceKind(mt domain.MatchType) string {
 	switch mt {
 	case domain.MatchExactCPE, domain.MatchCPERange:
 		return "cpe_match"
-	case domain.MatchPackageVersion, domain.MatchOSPackage:
+	case domain.MatchPackageVersion:
 		return "agent_package"
+	case domain.MatchOSPackage:
+		return "os_advisory"
 	case domain.MatchServiceVersion:
 		return "nmap_service"
 	default:
@@ -422,7 +492,7 @@ func containsAny(xs []string, want ...string) bool {
 }
 
 // redactSecrets strips obvious credential-looking values from banner text
-// before storage/display (spec §127).
+// before storage/display.
 func redactSecrets(s string) string {
 	fields := strings.Fields(s)
 	for i, f := range fields {

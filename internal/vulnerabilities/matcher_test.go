@@ -7,7 +7,7 @@ import (
 	"github.com/FlameInTheDark/aegis/internal/domain"
 )
 
-// fakeIndex is a deterministic in-memory index for table-driven tests (§106).
+// fakeIndex is a deterministic in-memory index for table-driven tests.
 type fakeIndex struct {
 	cves map[string]*domain.Vulnerability
 	osv  map[string][]domain.OSVRecord

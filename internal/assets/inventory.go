@@ -1,4 +1,4 @@
-// Package assets implements asset provisioning and correlation (spec §25):
+// Package assets implements asset provisioning and correlation :
 // different scanners report the same device differently; an identity
 // resolver merges observations into logical assets without ever merging
 // two devices solely because they shared an IP at different times.
@@ -8,6 +8,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +17,22 @@ import (
 	"github.com/FlameInTheDark/aegis/internal/ids"
 	pg "github.com/FlameInTheDark/aegis/internal/repository/postgres"
 )
+
+// IPStaleFromEnv reads AEGIS_ASSET_IP_STALE_DAYS (days). Every process that
+// builds an inventory Service (server hub ingestion, embedded scanner) uses
+// it so identity resolution behaves identically regardless of which path
+// applied the observation.
+func IPStaleFromEnv() time.Duration {
+	d := strings.TrimSpace(os.Getenv("AEGIS_ASSET_IP_STALE_DAYS"))
+	if d == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(d)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return time.Duration(n) * 24 * time.Hour
+}
 
 // Service provisions assets from observations.
 type Service struct {
@@ -40,7 +58,7 @@ type Service struct {
 //     (address-aware: rescans refresh the same asset instead of copying it;
 //     see Service.IPStale for the optional staleness bound),
 //  3. otherwise a NEW asset is created.
-func (s *Service) ProvisionHost(ctx context.Context, orgID, siteID, scanID, ip, mac, hostname, fqdn, source string, conf domain.Confidence) (*domain.Asset, bool, error) {
+func (s *Service) ProvisionHost(ctx context.Context, orgID, siteID, scanID, ip, mac, macVendor, hostname, fqdn, source string, conf domain.Confidence) (*domain.Asset, bool, error) {
 	created := false
 	asset := s.findByStrongID(ctx, mac, hostname, fqdn)
 	if asset == nil {
@@ -89,21 +107,32 @@ func (s *Service) ProvisionHost(ctx context.Context, orgID, siteID, scanID, ip, 
 	if fqdn != "" && asset.FQDN == "" {
 		fields["fqdn"] = fqdn
 	}
+	// Hardware vendor: nmap's resolved OUI organization is real evidence
+	// and upgrades the tiny built-in OUI guess; both only fill an empty
+	// vendor so agent-reported data stays authoritative.
 	if mac != "" && asset.Vendor == "" {
-		if v := OUIVendor(mac); v != "" {
+		if v := macVendor; v == "" {
+			v = OUIVendor(mac)
+			if v != "" {
+				fields["vendor"] = v
+			}
+		} else {
 			fields["vendor"] = v
 		}
+	}
+	if macVendor != "" && asset.Vendor != "" && asset.Vendor == OUIVendor(mac) {
+		fields["vendor"] = macVendor // upgrade the OUI guess to the real string
 	}
 	if err := s.Assets.Update(ctx, asset.ID, fields); err != nil {
 		s.Log.Warn("asset enrich failed", "asset", asset.ID, "err", err)
 	}
 	if ip != "" {
-		s.ensureInterface(ctx, asset.ID, mac, ip)
+		s.ensureInterface(ctx, asset.ID, mac, macVendor, ip)
 	}
 	return asset, created, nil
 }
 
-// RecordOS applies an OS observation with confidence and source (§15).
+// RecordOS applies an OS observation with confidence and source.
 // Override semantics: the LATEST observation of equal or higher confidence
 // replaces the stored fingerprint (equal-confidence observations refresh the
 // values instead of bouncing off them), so a fresh scan always updates the
@@ -294,20 +323,43 @@ func (s *Service) findService(ctx context.Context, assetID string, port int, pro
 	return nil, fmt.Errorf("not found")
 }
 
-func (s *Service) ensureInterface(ctx context.Context, assetID, mac, ip string) {
+func (s *Service) ensureInterface(ctx context.Context, assetID, mac, macVendor, ip string) {
+	if mac == "" {
+		return // no MAC: cannot key an interface row (IP-only observation)
+	}
+	var nic *domain.Interface
 	ifaces, err := s.Ifaces.ListForAsset(ctx, assetID)
 	if err == nil {
-		for _, ifc := range ifaces {
-			if mac != "" && strings.EqualFold(ifc.MAC, mac) {
-				return
-			}
-			if mac == "" {
-				return // avoid interface spam from IP-only observations
+		for i := range ifaces {
+			if strings.EqualFold(ifaces[i].MAC, mac) {
+				nic = &ifaces[i]
+				break
 			}
 		}
 	}
-	now := time.Now().UTC()
-	_ = s.Ifaces.Upsert(ctx, &domain.Interface{ID: ids.New(), AssetID: assetID, MAC: strings.ToLower(mac), Status: "unknown", FirstSeen: now, LastSeen: now})
+	if nic == nil {
+		now := time.Now().UTC()
+		nic = &domain.Interface{ID: ids.New(), AssetID: assetID, MAC: strings.ToLower(mac), Vendor: macVendor, Status: "unknown", FirstSeen: now, LastSeen: now}
+	} else if nic.Vendor == "" && macVendor != "" {
+		nic.Vendor = macVendor
+	}
+	if err := s.Ifaces.Upsert(ctx, nic); err != nil {
+		// Surface the failure instead of vanishing: this upsert once failed
+		// for the whole product lifetime (42P10 - migration 0003 had no
+		// unique index on (asset_id, mac) for the ON CONFLICT target) and
+		// MAC/vendor/address data silently never appeared in the inventory.
+		s.Log.Warn("interface upsert failed", "asset", assetID, "mac", mac, "err", err)
+		return
+	}
+	// Attach the observed address to the interface (idempotent): AddIP
+	// previously had zero callers, so ip_addresses stayed empty and the
+	// interfaces section of the asset page showed no addresses. The scanned
+	// address becomes the interface's single primary — exactly one per
+	// interface, mirroring the agent path's SetPrimaryIP convergence.
+	if ip != "" {
+		_ = s.Ifaces.AddIP(ctx, nic.ID, ip, false)
+		_ = s.Ifaces.SetPrimaryIP(ctx, nic.ID, ip)
+	}
 }
 
 func (s *Service) recordChange(ctx context.Context, scanID, siteID string, t domain.ChangeType, assetID, entity, before, after string) {

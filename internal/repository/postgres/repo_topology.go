@@ -18,7 +18,7 @@ type TopologyRepo struct{ db *DB }
 func NewTopologyRepo(db *DB) *TopologyRepo { return &TopologyRepo{db: db} }
 
 // UpsertNode creates or refreshes a topology node (reconciliation, not
-// wholesale replacement — spec §24).
+// wholesale replacement).
 func (r *TopologyRepo) UpsertNode(ctx context.Context, n *domain.TopologyNode) error {
 	props := jsonMarshal(n.Props)
 	q := r.db.Insert("topology_nodes").
@@ -58,7 +58,7 @@ func (r *TopologyRepo) AddEvidence(ctx context.Context, ev *domain.TopologyEvide
 
 // Graph returns the graph for a site, or org-wide when siteID is empty
 // (the UI defaults to ?site_id= before a site is selected). For very large
-// sites the API layer applies view-scoped filters (site/network/VLAN; §154).
+// sites the API layer applies view-scoped filters (site/network/VLAN).
 func (r *TopologyRepo) Graph(ctx context.Context, orgID, siteID string) ([]domain.TopologyNode, []domain.TopologyEdge, error) {
 	nwhere := squirrel.Eq{"organization_id": orgID}
 	ewhere := squirrel.Eq{"organization_id": orgID}
@@ -155,7 +155,7 @@ func (r *ReportRepo) Create(ctx context.Context, d *domain.ReportDefinition) err
 			"date_from", "date_to", "sections", "min_severity", "created_by").
 		Values(d.ID, d.OrganizationID, d.Name, string(d.Type), string(d.Format),
 			nullStr(d.SiteID), nullStr(d.AssetID), nullStr(d.ScanID), d.DateFrom, d.DateTo, nonNil(d.Sections),
-			nullPtrStr((*string)(&d.MinSeverity)), d.CreatedBy)
+			nullPtrStr((*string)(&d.MinSeverity)), nullStr(d.CreatedBy))
 	_, err := r.db.Exec(ctx, q)
 	return err
 }

@@ -1,6 +1,6 @@
 // Package redis implements cache, rate limiting, distributed locks,
 // deduplication windows and short-lived state. Redis is never the
-// authoritative store for assets, vulnerabilities or events (spec §80).
+// authoritative store for assets, vulnerabilities or events.
 package redisrepo
 
 import (
@@ -93,7 +93,7 @@ func (c *Client) Lock(ctx context.Context, key string, ttl time.Duration) (func(
 }
 
 // DedupCheck marks an idempotency key as seen within the window and reports
-// whether this is the first occurrence (spec §79, §122).
+// whether this is the first occurrence.
 func (c *Client) DedupCheck(ctx context.Context, key string, window time.Duration) (first bool, err error) {
 	ok, err := c.rdb.SetNX(ctx, "dedup:"+key, 1, window).Result()
 	return ok, err

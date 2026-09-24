@@ -1,5 +1,5 @@
 // Package risk implements the configurable environmental risk engine
-// (spec §37). Risk is never equal to CVSS alone; it blends technical
+// . Risk is never equal to CVSS alone; it blends technical
 // severity, exploitation likelihood, environmental exposure and business
 // impact into an explainable 0-100 score. Every score carries a human
 // readable explanation ("Risk is high because ...").
@@ -186,7 +186,7 @@ func Evaluate(in Inputs, w Weights) Result {
 }
 
 // SeverityFromScore maps the 0-100 risk scale onto the five label levels
-// (spec §133). Labels are always paired with numbers in the UI.
+// . Labels are always paired with numbers in the UI.
 func SeverityFromScore(s float64) domain.Severity {
 	switch {
 	case s >= 80:
@@ -202,7 +202,7 @@ func SeverityFromScore(s float64) domain.Severity {
 	}
 }
 
-// Explain renders the transparent one-paragraph explanation required by §37.
+// Explain renders the transparent one-paragraph explanation required by.
 func Explain(r Result) string {
 	if len(r.Factors) == 0 {
 		return fmt.Sprintf("Risk %.0f: minimal signals present.", r.Score)

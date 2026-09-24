@@ -1,92 +1,173 @@
-import { Component, ReactNode } from 'react'
-import { Navigate, Route, Routes } from 'react-router-dom'
-import { AuthProvider, useAuth } from '@/lib/auth'
-import { AppShell } from '@/components/layout/AppShell'
-import LoginPage from '@/features/auth/LoginPage'
-import DashboardPage from '@/features/dashboard/DashboardPage'
-import AssetsPage from '@/features/assets/AssetsPage'
-import AssetDetailPage from '@/features/assets/AssetDetailPage'
-import TopologyPage from '@/features/topology/TopologyPage'
-import ScansPage from '@/features/scans/ScansPage'
-import ScanDetailPage from '@/features/scans/ScanDetailPage'
-import VulnerabilitiesPage from '@/features/vulnerabilities/VulnerabilitiesPage'
-import VulnerabilityDetailPage from '@/features/vulnerabilities/VulnerabilityDetailPage'
-import FindingsPage from '@/features/findings/FindingsPage'
-import DetectionRulesPage from '@/features/detections/DetectionsPage'
-import EventsPage from '@/features/events/EventsPage'
-import AgentsPage from '@/features/agents/AgentsPage'
-import AgentDetailPage from '@/features/agents/AgentDetailPage'
-import ReportsPage from '@/features/reports/ReportsPage'
-import SettingsPage from '@/features/settings/SettingsPage'
+import * as React from "react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { AlertTriangle, Loader2 } from "lucide-react";
 
-// Error boundary keeps failures local and logs internally (§134).
-class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
-  state = { error: null as Error | null }
-  static getDerivedStateFromError(error: Error) { return { error } }
+import { RouterProvider, useRouter } from "@/lib/router";
+import { GroupsProvider } from "@/lib/groups";
+import { AuthProvider, useAuth } from "@/lib/auth";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { AppShell } from "@/components/layout/AppShell";
+import { OverviewPage } from "@/pages/OverviewPage";
+import { AssetsPage } from "@/pages/AssetsPage";
+import { AssetDetailPage } from "@/pages/AssetDetailPage";
+import { TopologyPage } from "@/pages/TopologyPage";
+import { ScansPage } from "@/pages/ScansPage";
+import { VulnerabilitiesPage } from "@/pages/VulnerabilitiesPage";
+import { FindingsPage } from "@/pages/FindingsPage";
+import { DetectionsPage } from "@/pages/DetectionsPage";
+import { EventsPage } from "@/pages/EventsPage";
+import { ConnectionsPage } from "@/pages/ConnectionsPage";
+import { ReportsPage } from "@/pages/ReportsPage";
+import { SettingsPage } from "@/pages/SettingsPage";
+import { LoginPage } from "@/features/auth/LoginPage";
+import { EmptyState } from "@/components/shared";
+import { Button } from "@/components/ui/button";
+import { Link } from "@/lib/router";
+import { Compass } from "lucide-react";
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 15_000,
+      retry: 1,
+      refetchOnWindowFocus: true,
+    },
+  },
+});
+
+function Routes() {
+  const { segments, path } = useRouter();
+  const [root, id] = segments;
+
+  // Re-mount page components when the primary route changes so local state resets per page
+  const key = `${root ?? "overview"}/${id ?? ""}`;
+
+  let page: React.ReactNode;
+  switch (root ?? "overview") {
+    case "overview":
+      page = <OverviewPage />;
+      break;
+    case "assets":
+      page = id ? <AssetDetailPage id={id} /> : <AssetsPage />;
+      break;
+    case "topology":
+      page = <TopologyPage />;
+      break;
+    case "scans":
+      page = <ScansPage />;
+      break;
+    case "vulnerabilities":
+      page = <VulnerabilitiesPage />;
+      break;
+    case "findings":
+      page = <FindingsPage />;
+      break;
+    case "detections":
+      page = <DetectionsPage />;
+      break;
+    case "events":
+      page = <EventsPage />;
+      break;
+    case "connections":
+      page = <ConnectionsPage />;
+      break;
+    case "reports":
+      page = <ReportsPage />;
+      break;
+    case "settings":
+      page = <SettingsPage />;
+      break;
+    default:
+      page = (
+        <EmptyState
+          icon={Compass}
+          title="Page not found"
+          description={`Nothing lives at ${path}.`}
+          action={
+            <Button size="sm" asChild>
+              <Link to="/overview">Back to overview</Link>
+            </Button>
+          }
+        />
+      );
+  }
+
+  return (
+    <PageErrorBoundary key={key}>{page}</PageErrorBoundary>
+  );
+}
+
+/** Per-page crash guard: one broken page renders an error, the shell survives. */
+class PageErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null as Error | null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error) {
+    console.error("Page crashed:", error);
+  }
+
   render() {
     if (this.state.error) {
       return (
-        <div className="flex h-full flex-col items-center justify-center gap-3">
-          <p className="text-[15px] font-medium">Something went wrong in this view.</p>
-          <p className="text-[12.5px] text-fg-dim">The error has been logged with a request id. Reload to recover.</p>
-          <button className="rounded-sm2 border border-line px-3 py-1.5 text-[13px]" onClick={() => window.location.reload()}>
-            Reload
-          </button>
-        </div>
-      )
+        <EmptyState
+          icon={AlertTriangle}
+          title="Something went wrong"
+          description={this.state.error.message}
+          action={
+            <Button size="sm" onClick={() => this.setState({ error: null })}>
+              Try again
+            </Button>
+          }
+        />
+      );
     }
-    return this.props.children
+    return this.props.children;
   }
 }
 
-// Full-screen splash shown while the session restore is in flight — the
-// user must never see the login screen flash before an existing session is
-// restored (and protected content must never render on stale state).
-export function AuthSplash() {
+/** Route guard: splash while restoring, login when unauthenticated. */
+function AuthGate() {
+  const { status } = useAuth();
+  if (status === "initializing") {
+    return (
+      <div className="flex h-screen w-full items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-3">
+          <div className="glow-primary flex size-11 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-[oklch(0.55_0.2_300)] text-base font-bold text-primary-foreground">
+            Æ
+          </div>
+          <Loader2 className="size-4 animate-spin text-muted-foreground" />
+        </div>
+      </div>
+    );
+  }
+  if (status === "unauthenticated") {
+    return <LoginPage />;
+  }
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-2" role="status">
-      <div className="flex h-8 w-8 items-center justify-center rounded-sm2 bg-accent text-[15px] font-bold text-white">Æ</div>
-      <p className="text-[12.5px] text-fg-dim">Restoring session…</p>
-    </div>
-  )
-}
-
-// RequireAuth is the ONLY route gate: it renders from the centralized auth
-// state, never from a storage flag. While initializing it shows the splash;
-// after logout/failed refresh the protected tree disappears immediately.
-function RequireAuth({ children }: { children: ReactNode }) {
-  const { status } = useAuth()
-  if (status === 'initializing') return <AuthSplash />
-  if (status === 'unauthenticated') return <Navigate to="/login" replace />
-  return <>{children}</>
+    <GroupsProvider>
+      <AppShell>
+        <Routes />
+      </AppShell>
+    </GroupsProvider>
+  );
 }
 
 export default function App() {
   return (
-    <ErrorBoundary>
-      <AuthProvider>
-        <Routes>
-          <Route path="/login" element={<LoginPage />} />
-          <Route element={<RequireAuth><AppShell /></RequireAuth>}>
-          <Route path="/" element={<DashboardPage />} />
-          <Route path="/assets" element={<AssetsPage />} />
-          <Route path="/assets/:id" element={<AssetDetailPage />} />
-          <Route path="/topology" element={<TopologyPage />} />
-          <Route path="/scans" element={<ScansPage />} />
-          <Route path="/scans/:id" element={<ScanDetailPage />} />
-          <Route path="/vulnerabilities" element={<VulnerabilitiesPage />} />
-          <Route path="/vulnerabilities/:cveId" element={<VulnerabilityDetailPage />} />
-          <Route path="/findings" element={<FindingsPage />} />
-          <Route path="/detections" element={<DetectionRulesPage />} />
-          <Route path="/events" element={<EventsPage />} />
-          <Route path="/agents" element={<AgentsPage />} />
-          <Route path="/agents/:id" element={<AgentDetailPage />} />
-          <Route path="/reports" element={<ReportsPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-        </Route>
-        <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </AuthProvider>
-    </ErrorBoundary>
-  )
+    <QueryClientProvider client={queryClient}>
+      <RouterProvider>
+        <AuthProvider>
+          <TooltipProvider>
+            <AuthGate />
+          </TooltipProvider>
+        </AuthProvider>
+      </RouterProvider>
+    </QueryClientProvider>
+  );
 }

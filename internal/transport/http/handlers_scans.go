@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"strconv"
 	"time"
 
 	"github.com/FlameInTheDark/aegis/internal/domain"
@@ -10,7 +11,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Scans (spec §57/§68/§116)
+// Scans
 
 // handleCreateScan validates and starts a scan with full scope safety.
 func (a *App) handleCreateScan(c *fiber.Ctx) error {
@@ -19,20 +20,22 @@ func (a *App) handleCreateScan(c *fiber.Ctx) error {
 		return he
 	}
 	var req struct {
-		SiteID          string   `json:"site_id"`
-		Name            string   `json:"name"`
-		Profile         string   `json:"profile"`
-		Targets         []string `json:"targets"`
-		Denylist        []string `json:"denylist"`
-		Engine          string   `json:"engine"`
-		ScannerID       string   `json:"scanner_id"`
-		ConfirmElevated bool     `json:"confirm_elevated"`
+		SiteID          string               `json:"site_id"`
+		Name            string               `json:"name"`
+		Profile         string               `json:"profile"`
+		Targets         []string             `json:"targets"`
+		Denylist        []string             `json:"denylist"`
+		Engine          string               `json:"engine"`
+		ScannerID       string               `json:"scanner_id"`
+		ConfirmElevated bool                 `json:"confirm_elevated"`
+		SSHHosts        []domain.SSHScanHost `json:"ssh_hosts"`
+		SSHInsecure     bool                 `json:"ssh_insecure_host_key"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return BadRequest("invalid JSON body")
 	}
-	if req.SiteID == "" || len(req.Targets) == 0 {
-		return BadRequest("site_id and targets are required")
+	if req.SiteID == "" {
+		return BadRequest("site_id is required")
 	}
 	// Do not create scans that no scanner can ever claim. A scanner is scoped to
 	// a site; accepting a scan for another site leaves it queued indefinitely.
@@ -41,15 +44,25 @@ func (a *App) handleCreateScan(c *fiber.Ctx) error {
 		a.log.Error("scanner list failed", "err", err)
 		return Internal("scanner list failed")
 	}
-	available := false
-	for _, scanner := range scanners {
-		if scanner.SiteID == req.SiteID && scanner.Health == "healthy" && time.Since(scanner.LastSeen) < 3*time.Minute {
-			available = true
-			break
+	healthy := 0
+	var chosen *domain.Scanner
+	for i := range scanners {
+		s := &scanners[i]
+		if s.SiteID == req.SiteID && s.Health == "healthy" && time.Since(s.LastSeen) < 3*time.Minute {
+			healthy++
+			if req.ScannerID != "" && s.ID == req.ScannerID {
+				chosen = s
+			}
 		}
 	}
-	if !available {
+	if healthy == 0 {
 		return Conflict("no healthy scanner is registered for this site")
+	}
+	// An explicitly chosen scanner must exist, belong to the site and be
+	// healthy; otherwise the scan would silently fall back to another
+	// executor than the operator picked.
+	if req.ScannerID != "" && chosen == nil {
+		return Conflict("the selected scanner is not healthy or not registered for this site")
 	}
 	profile := domain.ScanProfile(req.Profile)
 	if profile == "" {
@@ -60,6 +73,14 @@ func (a *App) handleCreateScan(c *fiber.Ctx) error {
 	def, err := a.svc.Orchestrator.ResolveProfile(Context(c), claims.OrganizationID, profile)
 	if err != nil {
 		return BadRequest("unknown profile")
+	}
+	// Agent-less SSH inventory has no network scope: the target set is the
+	// scanner's SSH host configuration, so the request may omit targets.
+	if !def.SSHCollect && len(req.Targets) == 0 {
+		return BadRequest("targets are required")
+	}
+	if len(req.SSHHosts) > 0 && !def.SSHCollect {
+		return BadRequest("ssh_hosts is only valid for the ssh_inventory profile")
 	}
 	if def.ElevatedReqs {
 		if !authzHasPerm(claims, domain.PermScanElevated) {
@@ -75,24 +96,47 @@ func (a *App) handleCreateScan(c *fiber.Ctx) error {
 	scan, err := a.svc.Orchestrator.Create(Context(c), scanning.CreateScanInput{
 		OrgID: claims.OrganizationID, SiteID: req.SiteID, Name: req.Name,
 		Profile: profile, Targets: req.Targets, Denylist: req.Denylist,
-		Engine: req.Engine, ScannerID: req.ScannerID,
+		SSHHosts:           req.SSHHosts,
+		SSHInsecureHostKey: req.SSHInsecure,
+		Engine:             req.Engine, ScannerID: req.ScannerID,
 		CreatedBy: claims.Subject, ElevatedOK: req.ConfirmElevated,
 	})
 	if err != nil {
 		return BadRequest(err.Error())
 	}
 	userID, ip, ua := a.auditContext(c)
-	detail := map[string]any{"profile": string(profile), "targets": req.Targets, "engine": req.Engine}
+	detail := map[string]any{"profile": string(profile), "targets": req.Targets, "engine": req.Engine, "ssh_hosts": len(req.SSHHosts)}
 	if def.ElevatedReqs {
 		a.svc.AuditService.EntryElevated(Context(c), claims.OrganizationID, userID, "scan.created_elevated", "scan:"+scan.ID, ip, ua, def.Warning, detail)
 	} else {
 		a.svc.AuditService.Entry(Context(c), claims.OrganizationID, userID, "scan.created", "scan:"+scan.ID, ip, ua, "success", detail)
 	}
-	// Immediate UX data (§116): scope, scanner, profile, rate, warnings.
+	// Immediate UX data: scope, scanner, profile, rate, warnings.
 	return c.Status(201).JSON(fiber.Map{
-		"scan":     scan,
+		"scan":     redactScan(scan),
 		"warnings": warningsFor(profile),
 	})
+}
+
+// redactSecret masks SSH credentials in scan configs returned by the
+// API: operators with scan-view permission see that credentials are
+// present, never the credentials themselves. Executors read scans
+// straight from the database / dispatch payloads and are unaffected.
+const redactSecret = "***"
+
+func redactScan(s *domain.Scan) *domain.Scan {
+	if s == nil || s.Config == nil {
+		return s
+	}
+	for i := range s.Config.SSHHosts {
+		if s.Config.SSHHosts[i].Password != "" {
+			s.Config.SSHHosts[i].Password = redactSecret
+		}
+		if s.Config.SSHHosts[i].KeyPEM != "" {
+			s.Config.SSHHosts[i].KeyPEM = redactSecret
+		}
+	}
+	return s
 }
 
 func warningsFor(p domain.ScanProfile) []string {
@@ -128,6 +172,9 @@ func (a *App) handleListScans(c *fiber.Ctx) error {
 	if err != nil {
 		return Internal("scan list failed")
 	}
+	for i := range items {
+		items[i] = *redactScan(&items[i])
+	}
 	return c.JSON(fiber.Map{"items": items, "total": total, "page": page, "limit": limit})
 }
 
@@ -139,7 +186,7 @@ func (a *App) handleGetScan(c *fiber.Ctx) error {
 	}
 	scope, _ := a.svc.Scans.Scope(Context(c), scan.ID)
 	tasks, _ := a.svc.Tasks.ListForScan(Context(c), scan.ID)
-	return c.JSON(fiber.Map{"scan": scan, "scope": scope, "tasks": tasks})
+	return c.JSON(fiber.Map{"scan": redactScan(scan), "scope": scope, "tasks": tasks})
 }
 
 func (a *App) handleCancelScan(c *fiber.Ctx) error {
@@ -180,7 +227,7 @@ func (a *App) handleScanTasks(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"items": items})
 }
 
-// handleListScanners lists registered scanners (§69).
+// handleListScanners lists registered scanners.
 func (a *App) handleListScanners(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
 	items, err := a.svc.Scanners.List(Context(c), claims.OrganizationID)
@@ -192,7 +239,7 @@ func (a *App) handleListScanners(c *fiber.Ctx) error {
 }
 
 // ---------------------------------------------------------------------------
-// Schedules (§17 recurring scans)
+// Schedules (recurring scans)
 
 func (a *App) handleListSchedules(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
@@ -246,4 +293,32 @@ func (a *App) handleDeleteSchedule(c *fiber.Ctx) error {
 		return NotFound("schedule not found")
 	}
 	return c.SendStatus(204)
+}
+
+// handleScanLogs serves the persisted job log tail of one scan. History
+// replay for the streaming UI: initial load fetches the newest window,
+// "load older" pages via the before=<seq> cursor. Org scoping rides the
+// standard ByID(claims org) path.
+func (a *App) handleScanLogs(c *fiber.Ctx) error {
+	claims := a.claimsFrom(c)
+	scan, err := a.svc.Scans.ByID(Context(c), claims.OrganizationID, c.Params("id"))
+	if err != nil {
+		return NotFound("scan not found")
+	}
+	var before int64
+	if v := c.Query("before"); v != "" {
+		if n, perr := strconv.ParseInt(v, 10, 64); perr == nil && n > 0 {
+			before = n
+		}
+	}
+	limit, _ := strconv.Atoi(c.Query("limit"))
+	items, err := a.svc.JobLogs.List(Context(c), scan.ID, before, limit)
+	if err != nil {
+		return Internal("failed to load job log")
+	}
+	hasMore := false
+	if len(items) > 0 {
+		hasMore = items[0].Seq > 1
+	}
+	return c.JSON(fiber.Map{"items": items, "has_more": hasMore})
 }

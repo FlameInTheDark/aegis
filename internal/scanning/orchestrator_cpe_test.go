@@ -90,6 +90,36 @@ func TestSoftwareFromService(t *testing.T) {
 	}
 }
 
+// Ingestion normalization on the nmap fingerprint path: the software row
+// keeps the detected version verbatim and carries the cleaned/canonical
+// form alongside it — the value CVE matching compares against.
+func TestSoftwareFromServiceNormalizesVersion(t *testing.T) {
+	cases := []struct {
+		name string
+		det  string
+		norm string
+	}{
+		{name: "plain version", det: "10.0p2", norm: "10.0p2"},
+		{name: "banner noise", det: "10.0p2 Debian 7", norm: "10.0p2"},
+		{name: "underscore banner", det: "OpenSSH_9.6p1", norm: "9.6p1"},
+		{name: "v prefix", det: "v1.24.0", norm: "1.24.0"},
+		{name: "distro revision", det: "1.24.0-1ubuntu3", norm: "1.24.0-1ubuntu3"},
+		{name: "nothing version-like", det: "unknown", norm: ""},
+	}
+	for _, tc := range cases {
+		sw := softwareFromService(&domain.Service{ServiceName: "ssh", Product: "OpenSSH", DetectedVersion: tc.det})
+		if sw == nil {
+			t.Fatalf("%s: softwareFromService = nil", tc.name)
+		}
+		if sw.Version != tc.det {
+			t.Errorf("%s: raw version rewritten: %q, want %q", tc.name, sw.Version, tc.det)
+		}
+		if sw.VersionNorm != tc.norm {
+			t.Errorf("%s: VersionNorm = %q, want %q", tc.name, sw.VersionNorm, tc.norm)
+		}
+	}
+}
+
 // The "cpes" payload key arrives as []string from in-memory observations and
 // as []any after a JSON round-trip; both shapes must resolve.
 func TestCPEList(t *testing.T) {

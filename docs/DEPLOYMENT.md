@@ -1,4 +1,4 @@
-# Deployment (spec §87/§88/§158)
+# Deployment
 
 ## Profiles
 
@@ -23,13 +23,13 @@ The scanner container runs with `cap_add: NET_RAW` only; use `network_mode: host
 
 ## Kubernetes
 
-Manifests under `deploy/kubernetes/`: namespace, config/secret templates, deployments with non-root securityContext, readiness/liveness on `/healthz` `/readyz`, HPA for workers, ingress with TLS annotations, and documented guidance for the scanner's `NET_RAW`/`hostNetwork` isolation (§88: minimum capabilities, never privileged by default).
+Manifests under `deploy/kubernetes/`: namespace, config/secret templates, deployments with non-root securityContext, readiness/liveness on `/healthz` `/readyz`, HPA for workers, ingress with TLS annotations, and documented guidance for the scanner's `NET_RAW`/`hostNetwork` isolation (: minimum capabilities, never privileged by default).
 
 ## Helm
 
 `deploy/helm/aegis/` wraps the same workloads with values for replicas, resources and ingress (`helm install aegis deploy/helm/aegis`).
 
-## Configuration (§86)
+## Configuration
 
 Environment-first (`AEGIS_*`), documented in `.env.example` and `configs/*.yaml`. Never hardcode secrets; compose defaults are demo-only and must be overridden in production.
 

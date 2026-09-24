@@ -17,7 +17,7 @@ const (
 	FindingSuppressed    FindingStatus = "suppressed"
 )
 
-// MatchType explains HOW a vulnerability was matched (spec §32).
+// MatchType explains HOW a vulnerability was matched.
 type MatchType string
 
 const (
@@ -55,7 +55,7 @@ type Finding struct {
 	UpdatedAt       time.Time     `json:"updated_at"`
 }
 
-// Evidence is a structured proof record backing a finding (spec §73).
+// Evidence is a structured proof record backing a finding.
 type Evidence struct {
 	ID        string         `json:"id"`
 	FindingID string         `json:"finding_id"`
@@ -77,7 +77,7 @@ type FindingStatusChange struct {
 	CreatedAt time.Time     `json:"created_at"`
 }
 
-// SuppressionScope defines what a suppression covers (spec §93).
+// SuppressionScope defines what a suppression covers.
 type SuppressionScope struct {
 	AssetID       *string `json:"asset_id,omitempty"`
 	ServiceID     *string `json:"service_id,omitempty"`

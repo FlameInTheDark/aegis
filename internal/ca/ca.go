@@ -1,4 +1,4 @@
-// Package ca implements the minimal agent device CA (spec §16): it issues
+// Package ca implements the minimal agent device CA: it issues
 // short-lived device certificates from CSRs. In development a CA is
 // bootstrapped automatically; production mounts the CA key via secrets.
 package ca

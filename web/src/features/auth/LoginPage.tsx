@@ -1,64 +1,103 @@
-import { FormEvent, useState } from 'react'
-import { Navigate, useNavigate } from 'react-router-dom'
-import { useAuth } from '@/lib/auth'
+import * as React from "react";
+import { Loader2, Lock, ShieldCheck } from "lucide-react";
 
-export default function LoginPage() {
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [error, setError] = useState('')
-  const [busy, setBusy] = useState(false)
-  const navigate = useNavigate()
-  const { status, login } = useAuth()
+import { useAuth } from "@/lib/auth";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Kbd } from "@/components/shared";
 
-  // A session restored through the refresh cookie has no business here.
-  if (status === 'authenticated') return <Navigate to="/" replace />
+/** Full-screen login in the platform's visual language. */
+export function LoginPage() {
+  const { login } = useAuth();
+  const [email, setEmail] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [error, setError] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
 
-  const submit = async (e: FormEvent) => {
-    e.preventDefault()
-    setBusy(true)
-    setError('')
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (busy) return;
+    setError("");
+    setBusy(true);
     try {
-      // login() establishes the session atomically: access token to memory,
-      // refresh cookie set by the server, centralized state flips to
-      // authenticated BEFORE navigation happens.
-      await login(email, password)
-      navigate('/', { replace: true })
+      await login(email.trim(), password);
     } catch (err) {
-      setError((err as Error).message)
-    } finally {
-      setBusy(false)
+      const msg = err instanceof Error ? err.message : "Login failed";
+      setError(/credentials|unauthorized|401/i.test(msg) ? "Invalid email or password." : msg);
+      setBusy(false);
     }
-  }
+  };
 
   return (
-    <div className="flex h-full items-center justify-center">
-      <div className="w-[360px]">
-        <div className="mb-6 flex items-center gap-2.5">
-          <div className="flex h-8 w-8 items-center justify-center rounded-sm2 bg-accent text-[15px] font-bold text-white">Æ</div>
+    <div className="relative flex min-h-screen items-center justify-center overflow-hidden bg-background p-4">
+      {/* Ambient brand glow */}
+      <div aria-hidden className="pointer-events-none absolute -top-40 left-1/2 h-130 w-200 -translate-x-1/2 rounded-full bg-primary/10 blur-[120px]" />
+      <div aria-hidden className="pointer-events-none absolute bottom-0 right-0 h-80 w-80 rounded-full bg-primary/5 blur-[100px]" />
+
+      <div className="relative w-full max-w-sm">
+        <div className="mb-6 flex flex-col items-center gap-3 text-center">
+          <div className="glow-primary flex size-12 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-[oklch(0.55_0.2_300)] text-lg font-bold text-primary-foreground">
+            Æ
+          </div>
           <div>
-            <h1 className="text-[16px] font-semibold">Aegis Security Platform</h1>
-            <p className="text-[12px] text-fg-dim">Sign in to your workspace</p>
+            <h1 className="text-lg font-semibold tracking-tight">Aegis Security Platform</h1>
+            <p className="mt-1 text-sm text-muted-foreground">Sign in to your workspace</p>
           </div>
         </div>
-        <form onSubmit={submit} className="space-y-3 rounded-md2 border border-line bg-bg-panel p-5">
-          <label className="block text-[12px] text-fg-dim" htmlFor="email">Email</label>
-          <input id="email" type="email" required autoComplete="username" value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            className="w-full rounded-sm2 border border-line bg-bg-raise px-2.5 py-2 text-[13px] outline-none focus:border-accent" />
-          <label className="block text-[12px] text-fg-dim" htmlFor="password">Password</label>
-          <input id="password" type="password" required autoComplete="current-password" value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            className="w-full rounded-sm2 border border-line bg-bg-raise px-2.5 py-2 text-[13px] outline-none focus:border-accent" />
-          {error && <p className="rounded-sm2 border border-crit/30 bg-crit/10 px-2.5 py-1.5 text-[12.5px] text-crit" role="alert">{error}</p>}
-          <button type="submit" disabled={busy}
-            className="w-full rounded-sm2 bg-accent py-2 text-[13px] font-medium text-white hover:bg-accent-hover disabled:opacity-50">
-            {busy ? 'Signing in…' : 'Sign in'}
-          </button>
+
+        <form
+          onSubmit={submit}
+          className="rounded-xl border bg-card p-6 shadow-lg"
+        >
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="email">Email</Label>
+              <Input
+                id="email"
+                type="email"
+                autoComplete="username"
+                placeholder="you@company.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+                autoFocus
+              />
+            </div>
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="password">Password</Label>
+              <Input
+                id="password"
+                type="password"
+                autoComplete="current-password"
+                placeholder="••••••••••••"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+              />
+            </div>
+
+            {error && (
+              <div role="alert" className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
+                {error}
+              </div>
+            )}
+
+            <Button type="submit" className="mt-1 w-full gap-2" disabled={busy || !email || !password}>
+              {busy ? <Loader2 className="size-4 animate-spin" /> : <Lock className="size-4" />}
+              {busy ? "Signing in…" : "Sign in"}
+            </Button>
+          </div>
         </form>
-        <p className="mt-4 rounded-sm2 border border-line bg-bg-panel px-3 py-2 text-center text-[11.5px] text-fg-faint">
-          Demo deployment: admin@aegis.local / aegis-demo-admin-2026 (see README)
+
+        <p className="mt-4 flex items-center justify-center gap-1.5 text-center text-[11px] text-muted-foreground">
+          <ShieldCheck className="size-3" />
+          Sessions rotate automatically · all actions audited
+        </p>
+        <p className="mt-2 flex items-center justify-center gap-1 text-center text-[11px] text-muted-foreground/70">
+          Press <Kbd>⏎</Kbd> to continue
         </p>
       </div>
     </div>
-  )
+  );
 }

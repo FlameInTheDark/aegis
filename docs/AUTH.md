@@ -1,8 +1,7 @@
 # Authentication Architecture
 
 Production-grade JWT authentication for the React SPA + API backend.
-This document is both the audit record (what was wrong before v1.2.8) and
-the specification of the current flow.
+This document specifies the token model, endpoints and session flow.
 
 ## 1. Token model
 
@@ -14,14 +13,14 @@ the specification of the current flow.
 Hard rules enforced by the code and verified by tests:
 
 - The refresh token **never** appears in a JSON response, in JavaScript,
-  in logs, in URLs, or in any browser storage.
+ in logs, in URLs, or in any browser storage.
 - The access JWT is **never** written to localStorage/sessionStorage/
-  IndexedDB. (The api client deletes the legacy `aegis_access` /
-  `aegis_refresh` keys of pre-v1.2.8 builds on boot.)
+ IndexedDB. (The api client deletes stale `aegis_access` /
+ `aegis_refresh` localStorage keys on boot.)
 - The server re-derives role and organization from the **database** on
-  every refresh — a role downgrade or a disabled account takes effect at
-  the next refresh, not after the access TTL. Client-side claims are
-  presentation only; every API call is re-validated server-side.
+ every refresh — a role downgrade or a disabled account takes effect at
+ the next refresh, not after the access TTL. Client-side claims are
+ presentation only; every API call is re-validated server-side.
 
 ## 2. Endpoints
 
@@ -39,22 +38,22 @@ Every successful refresh rotates the refresh token:
 
 - `sessions.refresh_hash` — hash of the currently valid token.
 - `sessions.retired` (JSONB) — ledger of retired hashes → retirement time
-  (kept for 1h, capped at 200 entries).
+ (kept for 1h, capped at 200 entries).
 
 Rules when a refresh arrives:
 
 1. Token hash matches `refresh_hash` → **rotate**: retire the presented
-   hash, install a fresh token, set the new cookie, issue a new access JWT.
+ hash, install a fresh token, set the new cookie, issue a new access JWT.
 2. Token hash matches a **retired** entry **within the grace window**
-   (`AEGIS_REFRESH_ROTATION_GRACE`, default 30s) → concurrent-refresh race
-   (multi-tab, 401 retry waves): rotate forward as well. The rotation
-   UPDATE retires the row's *current* hash atomically at write time (row
-   locks serialize rotations), so whatever token landed last in the
-   browser's shared cookie jar is always acceptable — no interleave
-   strands a tab.
+ (`AEGIS_REFRESH_ROTATION_GRACE`, default 30s) → concurrent-refresh race
+ (multi-tab, 401 retry waves): rotate forward as well. The rotation
+ UPDATE retires the row's *current* hash atomically at write time (row
+ locks serialize rotations), so whatever token landed last in the
+ browser's shared cookie jar is always acceptable — no interleave
+ strands a tab.
 3. Token hash matches a retired entry **beyond the grace window** →
-   **reuse of a possibly-stolen token**: the whole session family is
-   revoked (reuse detection), the event is audited, and the caller gets 401.
+ **reuse of a possibly-stolen token**: the whole session family is
+ revoked (reuse detection), the event is audited, and the caller gets 401.
 4. No match → 401 `session expired or revoked`.
 
 ## 4. CSRF
@@ -64,11 +63,11 @@ The refresh token is a cookie, so `POST /auth/refresh` and
 Two independent defenses:
 
 1. **SameSite=Lax** — browsers do not attach the cookie to cross-site
-   POST requests.
+ POST requests.
 2. **Custom-header requirement** (`X-Requested-With: XMLHttpRequest`) — a
-   cross-site attacker cannot add custom headers without a CORS preflight,
-   and the server's CORS allowlist only accepts the deployed origin
-   (`AEGIS_PUBLIC_URL`). Missing header → 403.
+ cross-site attacker cannot add custom headers without a CORS preflight,
+ and the server's CORS allowlist only accepts the deployed origin
+ (`AEGIS_PUBLIC_URL`). Missing header → 403.
 
 Everything else (`/api/v1/*`) is Bearer-header authenticated and therefore
 CSRF-irrelevant. The deployment model is same-origin (the frontend nginx
@@ -85,9 +84,9 @@ Assume any XSS can read everything JavaScript can:
 - Refresh token: HttpOnly — unreadable to JavaScript by construction.
 - No tokens in URLs, logs, telemetry, error reports, or persistent state.
 - The SPA renders through React's default escaping; no
-  `dangerouslySetInnerHTML` is used anywhere in the codebase.
+ `dangerouslySetInnerHTML` is used anywhere in the codebase.
 - Short access TTL bounds the value of a stolen in-memory token;
-  refresh-token theft is contained by rotation + reuse detection.
+ refresh-token theft is contained by rotation + reuse detection.
 
 ## 6. SPA session lifecycle (`web/src/lib/auth.tsx`, `web/src/lib/api.ts`)
 
@@ -99,59 +98,44 @@ initializing ──restore ok──▶ authenticated ──logout / session lost
 ```
 
 - **Startup restore**: on mount the provider calls `POST /auth/refresh`
-  (the browser attaches the cookie). `ok` → fetch `/auth/me`, store the
-  access JWT in memory, become `authenticated`. Definitive rejection →
-  `unauthenticated`. Transient failure (network/5xx) is retried
-  (3 attempts, backoff) and never treated as a logout; only after the
-  retries the login screen is shown. Route guards render a splash while
-  `initializing` — no flash of the login screen before an existing
-  session is restored.
+ (the browser attaches the cookie). `ok` → fetch `/auth/me`, store the
+ access JWT in memory, become `authenticated`. Definitive rejection →
+ `unauthenticated`. Transient failure (network/5xx) is retried
+ (3 attempts, backoff) and never treated as a logout; only after the
+ retries the login screen is shown. Route guards render a splash while
+ `initializing` — no flash of the login screen before an existing
+ session is restored.
 - **API client**: all calls go through one client; the access token is
-  attached centrally; 401 triggers a **single-flight** refresh (any
-  number of simultaneous 401s share one network refresh) and each request
-  retries **exactly once**. A 403 on an *expired* access token also
-  attempts one refresh+retry (covers middleboxes that mangle the failure
-  mode — the field-reported "403 with expired token"); a 403 on a fresh
-  token is a real permission error and never logs out.
+ attached centrally; 401 triggers a **single-flight** refresh (any
+ number of simultaneous 401s share one network refresh) and each request
+ retries **exactly once**. A 403 on an *expired* access token also
+ attempts one refresh+retry (covers middleboxes that mangle the failure
+ mode); a 403 on a fresh
+ token is a real permission error and never logs out.
 - **Refresh tri-state**: `ok` / `invalid` / `transient`. Only a
-  definitive rejection moves the UI to unauthenticated (exactly once);
-  transient failures keep the session, back off exponentially (15→60s),
-  and recover through the re-armed proactive timer (renewal ~90s before
-  expiry) plus focus/visibility/interval safety nets. The reactive 401
-  path remains the authority; the server remains the only validator.
+ definitive rejection moves the UI to unauthenticated (exactly once);
+ transient failures keep the session, back off exponentially (15→60s),
+ and recover through the re-armed proactive timer (renewal ~90s before
+ expiry) plus focus/visibility/interval safety nets. The reactive 401
+ path remains the authority; the server remains the only validator.
 - **Logout**: `POST /auth/logout` (server revokes the family + clears the
-  cookie) → memory token cleared → query cache purged → BroadcastChannel
-  tells other tabs → navigation happens after state is actually cleared.
+ cookie) → memory token cleared → query cache purged → BroadcastChannel
+ tells other tabs → navigation happens after state is actually cleared.
 - **Cross-tab**: a BroadcastChannel (`aegis-auth`, event names only — no
-  credentials) propagates logout (other tabs drop to unauthenticated
-  immediately) and login (other tabs restore through the shared cookie).
-  Multi-tab refresh races are safe by design (rotation grace, §3).
+ credentials) propagates logout (other tabs drop to unauthenticated
+ immediately) and login (other tabs restore through the shared cookie).
+ Multi-tab refresh races are safe by design (rotation grace).
 
-## 7. Audit record (pre-v1.2.8 state → fixes)
-
-| # | Finding (v1.2.7 and earlier) | Resolution |
-|---|---|---|
-| 1 | Access JWT **and** refresh JWT persisted in `localStorage` (XSS steals both; tokens survive the tab) | Access token in memory; refresh token HttpOnly-only; legacy keys deleted on boot |
-| 2 | Refresh token was a **JWT** returned in JSON | Opaque 256-bit token, cookie-only |
-| 3 | No rotation; stolen refresh valid until 30d TTL | Per-refresh rotation + reuse detection with family revocation |
-| 4 | Refresh/logout took the token from the request body | Cookie-authenticated + CSRF-guarded |
-| 5 | Refreshed access tokens re-used **stale role/org claims** from the refresh token (authorization drift up to 30d) | Role/org/membership re-resolved from the DB on every refresh; disabled accounts revoked on the spot |
-| 6 | Logout was client-side only (empty body → the server revoked nothing) | Server-side revocation by cookie + cookie clear; audited |
-| 7 | No `initializing` auth state: route gate read a storage flag | Centralized tri-state provider; splash during restore |
-| 8 | "403 with expired token" dead-ended in an error wall | 401 handled by refresh; anomalous 403-on-expired-token also refreshes+retries once; definitive loss lands on the login screen exactly once |
-| 9 | No cookie flags / prefix policy | `HttpOnly; SameSite=Lax; Path=/`, `Secure` + `__Host-` prefix when HTTPS (`AEGIS_AUTH_COOKIE_SECURE`, default true in production) |
-| 10 | Rate limits: login 20/min, refresh 120/min (kept) | unchanged, verified by the refresh-storm test |
-
-## 8. Verification
+## 7. Verification
 
 - `scripts/repro-auth.sh` (34 checks): cookie flags, no-secret-in-body,
-  expiry→401, CSRF guards, rotation, grace race, reuse beyond grace →
-  family revoked, garbage cookie, logout revocation + cookie clear,
-  30-way concurrent refresh storm (zero 5xx/logouts), server-side sorting,
-  streamed report download.
+ expiry→401, CSRF guards, rotation, grace race, reuse beyond grace →
+ family revoked, garbage cookie, logout revocation + cookie clear,
+ 30-way concurrent refresh storm (zero 5xx/logouts), server-side sorting,
+ streamed report download.
 - `internal/repository/postgres/integration_session_rotation_test.go`:
-  repo-level rotation lifecycle against real PostgreSQL.
+ repo-level rotation lifecycle against real PostgreSQL.
 - `internal/auth`: opaque token properties, access-JWT session binding,
-  expired-token rejection.
-- `scripts/e2e-features.sh` §17: concurrent refresh race with two cookie
-  jars, both renewed tokens authenticate, no refresh_token in any body.
+ expired-token rejection.
+- `scripts/e2e-features.sh`: concurrent refresh race with two cookie
+ jars, both renewed tokens authenticate, no refresh_token in any body.

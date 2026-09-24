@@ -22,6 +22,16 @@ func TestVulnOrderClause(t *testing.T) {
 		{"cve_id", "", "v.cve_id ASC"}, // "by name" reads A→Z by default
 		{"cvss_score", "desc", "cvss_score DESC"},
 		{"known_exploited", "asc", "known_exploited ASC"},
+		// Friendly aliases the UI sends (v1.16.1 regression: the browser
+		// used these spellings while the whitelist only knew the canonical
+		// keys, so every sort option degraded to the default clause and
+		// sorting appeared dead).
+		{"published", "desc", "v.published_at DESC NULLS LAST"},
+		{"name", "asc", "v.cve_id ASC"},
+		{"cvss", "asc", "cvss_score ASC"},
+		{"kev", "desc", "known_exploited DESC"},
+		{"CVSS", "desc", "cvss_score DESC"}, // case-insensitive
+		{" Name ", "", "v.cve_id ASC"},      // trimmed + per-key default dir
 	}
 	for _, c := range cases {
 		got := vulnOrderClause(c.sort, c.order)

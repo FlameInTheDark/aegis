@@ -8,7 +8,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-// PageQuery is offset pagination for small administrative lists (spec §119).
+// PageQuery is offset pagination for small administrative lists.
 type PageQuery struct {
 	Page   int    `json:"page"`
 	Limit  int    `json:"limit"`
@@ -18,7 +18,7 @@ type PageQuery struct {
 }
 
 // CursorQuery is cursor pagination for large datasets: events, assets,
-// findings, services (spec §119).
+// findings, services.
 type CursorQuery struct {
 	Cursor string `json:"cursor"`
 	Limit  int    `json:"limit"`

@@ -8,7 +8,7 @@ import (
 )
 
 // Metrics bundles the platform's Prometheus collectors. Label cardinality is
-// deliberately bounded: no IPs, user ids, asset ids or paths (spec §48).
+// deliberately bounded: no IPs, user ids, asset ids or paths.
 type Metrics struct {
 	registry *prometheus.Registry
 

@@ -1,5 +1,5 @@
 // Package clickhouse implements high-volume event storage and analytics
-// queries (spec §23, §60).
+// queries.
 package clickhouse
 
 import (
@@ -72,6 +72,13 @@ func Connect(ctx context.Context, rawURL string, schemaFS func() ([]byte, error)
 	conn, err := ch.Open(opts)
 	if err != nil {
 		return nil, fmt.Errorf("clickhouse: connect: %w", err)
+	}
+	// Open is lazy in clickhouse-go v2 — nothing touches the network until
+	// the first query. Ping once so bad credentials or an unreachable
+	// server fail here, at startup, instead of on the first request.
+	if err := conn.Ping(ctx); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("clickhouse: ping: %w", err)
 	}
 	d.conn = conn
 	return d, nil
@@ -246,13 +253,15 @@ func (d *DB) QueryEvents(ctx context.Context, f EventFilter) ([]domain.Event, er
 		var srcIP, dstIP string
 		var agentID, siteID uuid.UUID
 		var srcPort, dstPort uint16 // UInt16 columns; domain.Event uses int
+		var severity string         // named type; the driver only scans String into *string
 		if err := rows.Scan(&e.EventID, &siteID, &e.SensorID, &agentID, &e.Timestamp,
 			&e.EventType, &e.Source, &srcIP, &srcPort, &dstIP, &dstPort,
-			&e.Protocol, &e.Direction, &e.Severity, &e.Action, &e.RuleID, &e.RuleName, &e.Hostname); err != nil {
+			&e.Protocol, &e.Direction, &severity, &e.Action, &e.RuleID, &e.RuleName, &e.Hostname); err != nil {
 			return nil, err
 		}
 		e.SrcPort = int(srcPort)
 		e.DstPort = int(dstPort)
+		e.Severity = domain.Severity(severity)
 		e.SiteID = uuidStr(siteID)
 		e.AgentID = uuidStr(agentID)
 		e.SrcIP = formatIP(srcIP)
@@ -284,6 +293,38 @@ func (d *DB) EventVolume(ctx context.Context, tenantID string, from time.Time, i
 	for rows.Next() {
 		var p VolumePoint
 		if err := rows.Scan(&p.Bucket, &p.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// CategoryVolumePoint is one day/event_type bucket of the event stream.
+type CategoryVolumePoint struct {
+	Bucket   time.Time `json:"bucket"`
+	Category string    `json:"category"`
+	Count    uint64    `json:"count"`
+}
+
+// EventVolumeByCategory aggregates event counts per day AND event_type —
+// the overview "event volume" chart stacks the categories. interval is a
+// ClickHouse unit (minute/hour/day).
+func (d *DB) EventVolumeByCategory(ctx context.Context, tenantID string, from time.Time, interval string) ([]CategoryVolumePoint, error) {
+	if interval == "" {
+		interval = "day"
+	}
+	rows, err := d.conn.Query(ctx,
+		"SELECT toStartOfInterval(timestamp, INTERVAL ? "+interval+") AS bucket, event_type, count() AS c FROM security_events WHERE tenant_id = ? AND timestamp >= ? GROUP BY bucket, event_type ORDER BY bucket",
+		1, mustUUID(tenantID), from)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []CategoryVolumePoint
+	for rows.Next() {
+		var p CategoryVolumePoint
+		if err := rows.Scan(&p.Bucket, &p.Category, &p.Count); err != nil {
 			return nil, err
 		}
 		out = append(out, p)

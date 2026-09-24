@@ -2,7 +2,7 @@
 
 ## Principles
 
-Aegis is a **modular monolith with independently deployable workers** — not a fleet of microservices (spec §5). Business capability stays in internal packages with clean boundaries; only genuinely network-bound work (scanning, feeding, agents) runs as separate deployables. Scaling is configuration, not a rewrite.
+Aegis is a **modular monolith with independently deployable workers** — not a fleet of microservices. Business capability stays in internal packages with clean boundaries; only genuinely network-bound work (scanning, feeding, agents) runs as separate deployables. Scaling is configuration, not a rewrite.
 
 ## Deployables
 
@@ -29,7 +29,7 @@ flowchart LR
   K --> L[dashboard, reports, detections]
 ```
 
-## Storage responsibilities (spec §74)
+## Storage responsibilities
 
 | Store | Contents | Retention model |
 |---|---|---|
@@ -38,7 +38,7 @@ flowchart LR
 | Redis | cache, rate limits, locks, dedup windows | ephemeral — never authoritative |
 | S3/RustFS | raw feed snapshots, scanner output, report artifacts, optional PCAP | lifecycle policies |
 
-## NATS subject model (spec §78)
+## NATS subject model
 
 | Subject | Producer | Consumer |
 |---|---|---|
@@ -47,8 +47,8 @@ flowchart LR
 | `security.agent.telemetry.v1` | agent pipeline | worker ingest |
 | `security.detection.match.v1` | detection engine | notifier |
 
-Versioned payloads; consumers are idempotent (at-least-once delivery, §79).
+Versioned payloads; consumers are idempotent (at-least-once delivery).
 
 ## Frontend
 
-React 18 + TypeScript + Vite + Tailwind, TanStack Query for server state, ECharts theming shared across chart components. Dense Linear-inspired dark UI with command palette and keyboard navigation. Cursor pagination on events, offset pagination elsewhere; the browser never holds unbounded data (§153).
+React 18 + TypeScript + Vite + Tailwind, TanStack Query for server state, ECharts theming shared across chart components. Dense Linear-inspired dark UI with command palette and keyboard navigation. Cursor pagination on events, offset pagination elsewhere; the browser never holds unbounded data.

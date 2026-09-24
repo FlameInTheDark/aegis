@@ -14,7 +14,7 @@ import (
 	"github.com/google/uuid"
 )
 
-// authenticate validates the Bearer JWT and loads claims (§7).
+// authenticate validates the Bearer JWT and loads claims.
 func (a *App) authenticate() fiber.Handler {
 	return func(c *fiber.Ctx) error {
 		header := c.Get("Authorization")
@@ -80,10 +80,6 @@ func (a *App) auditContext(c *fiber.Ctx) (userID, ip, ua string) {
 //     of a possibly-stolen token and revokes the whole session family.
 
 const (
-	// refreshRotationGrace bounds how long a just-retired refresh token
-	// may still be exchanged. Wide enough for multi-tab 401 retry waves,
-	// far shorter than an attacker-friendly window.
-	refreshRotationGrace = 30 * time.Second
 	// xhrHeaderName is required on the cookie-authenticated endpoints
 	// (refresh/logout). A cross-site attacker cannot attach a custom
 	// header without a successful CORS preflight, and the platform's CORS
@@ -159,7 +155,7 @@ const nilUUID = "00000000-0000-0000-0000-000000000000"
 
 // handleLogin verifies credentials, creates a rotating session family and
 // answers with the access JWT in the body + the refresh cookie. The audit
-// trail records every attempt (§7/§85).
+// trail records every attempt.
 func (a *App) handleLogin(c *fiber.Ctx) error {
 	var req loginRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -225,7 +221,7 @@ func (a *App) handleLogin(c *fiber.Ctx) error {
 }
 
 func hashRefresh(s string) string {
-	// Refresh tokens are stored hashed (never plaintext, §7).
+	// Refresh tokens are stored hashed (never plaintext).
 	return sha256Sum(s)
 }
 
@@ -289,7 +285,11 @@ func (a *App) handleRefresh(c *fiber.Ctx) error {
 		// retires the current token too, so no interleave strands a
 		// tab). After the window this is REUSE: revoke the family and
 		// force a login.
-		if time.Now().UnixMilli()-s.RetiredAtMs > refreshRotationGrace.Milliseconds() {
+		grace := a.svc.Cfg.Auth.RotationGrace
+		if grace <= 0 {
+			grace = 30 * time.Second
+		}
+		if time.Now().UnixMilli()-s.RetiredAtMs > grace.Milliseconds() {
 			_ = a.svc.Sessions.Revoke(ctx, s.ID)
 			a.svc.AuditService.Entry(ctx, s.OrganizationID, s.UserID, audit.ActionLogout, "user:"+s.UserID, c.IP(), "", "denied",
 				map[string]any{"reason": "refresh token reuse detected; session family revoked"})

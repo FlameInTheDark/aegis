@@ -69,6 +69,21 @@ export interface Asset {
 
 // deviceTypeLabels mirrors the backend taxonomy (domain.DeviceType.Label).
 
+/**
+ * Read-time normalization detail attached to version fields: the verbatim
+ * reported string, the normalized form CVE matching actually compares,
+ * and the parsed structure (epoch/upstream/revision) behind it.
+ */
+export interface VersionMeta {
+  raw: string
+  normalized: string
+  well_formed: boolean
+  grammar: string
+  epoch?: number
+  upstream?: string
+  revision?: string
+}
+
 export interface Service {
   id: string
   asset_id: string
@@ -78,6 +93,9 @@ export interface Service {
   product?: string
   vendor?: string
   detected_version?: string
+  /** Ingestion-normalized banner version ("10.0p2 Ubuntu 5ubuntu5.4" → "10.0p2-5ubuntu5.4") — what CVE matching compares. */
+  version_norm?: string
+  version_meta?: VersionMeta
   version_confidence?: number
   cpes?: string[]
   banner?: string
@@ -93,6 +111,9 @@ export interface Software {
   id: string
   name: string
   version?: string
+  /** Ingestion-normalized form (noise stripped, grammar-canonical) — what CVE matching compares. */
+  version_norm?: string
+  version_meta?: VersionMeta
   ecosystem?: string
   purl?: string
   source?: string
@@ -176,6 +197,41 @@ export interface VulnerabilityRow {
   epss?: number
 }
 
+export interface SSHScanHost {
+  host: string
+  port?: number // 0 / undefined = default 22
+  username: string
+  auth?: 'password' | 'key'
+  password?: string
+  key_pem?: string
+  pinned_key?: string // authorized_keys-format host key; handshake must match exactly
+}
+
+// One read-only command the SSH collector executed on a host (command
+// strings are compile-time constants server-side; the log adds outcome and
+// output line counts).
+export interface SSHCommandRun {
+  cmd: string
+  ok: boolean
+  lines: number
+  err?: string
+}
+
+// Per-host summary of an SSH inventory scan, rendered by the scan view.
+export interface SSHHostSummary {
+  host: string
+  port?: number
+  user?: string
+  os_family?: string
+  os_name?: string
+  os_version?: string
+  os_ok: boolean
+  package_count: number
+  commands?: SSHCommandRun[]
+  duration_ms: number
+  error?: string
+}
+
 export interface Scan {
   id: string
   organization_id: string
@@ -186,17 +242,23 @@ export interface Scan {
   state: string
   progress: number
   phase?: string
+  config?: {
+    ssh_hosts?: SSHScanHost[] // credentials are redacted ("***") in API responses
+    ssh_insecure_host_key?: boolean
+  }
   stats: {
     targets: number
     reachable: number
     unreachable: number
     ports_discovered: number
     services_fingerprinted: number
+    packages_collected: number
     findings_created: number
     critical_findings: number
     tasks_total: number
     tasks_done: number
     tasks_failed: number
+    ssh_hosts?: SSHHostSummary[]
   }
   error?: string
   kill_switch?: boolean
@@ -232,6 +294,9 @@ export interface Scanner {
   capabilities: string[]
   health: string
   last_seen: string
+  transport?: string // nats (embedded) | grpc (hub agent) | connector (aegis-connector)
+  is_default?: boolean
+  connector_id?: string // set when the scanner is managed via Connections
 }
 
 export interface DetectionRule {
@@ -355,9 +420,36 @@ export interface TopologyNode {
 
 export interface TopologyEdge {
   id: string
-  source: string
-  dest: string
+  src_node_id: string
+  dst_node_id: string
   kind: string
   confidence?: number
   last_seen?: string
+}
+
+export interface TraceHop {
+  ttl: number
+  ip: string
+  hostname?: string
+  rtt_ms?: number
+}
+
+// One stored traceroute result (per site+target): parsed hop path plus the
+// raw probe output for auditing. hop_ips is every address on the path, so
+// an asset page lists traces covering its address, not only traces aimed
+// at it.
+export interface AssetTrace {
+  id: string
+  site_id: string
+  scan_id: string
+  target_ip: string
+  method: string
+  probe: string
+  complete: boolean
+  hops_count: number
+  path: TraceHop[]
+  raw?: string
+  confidence?: number
+  first_seen: string
+  last_seen: string
 }

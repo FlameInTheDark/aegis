@@ -1,4 +1,4 @@
-// Package reports implements report generation (spec §50/§138): report
+// Package reports implements report generation: report
 // definitions are separate from jobs; artifacts are stored in object
 // storage and served via presigned URLs. Formats: PDF (print-ready HTML
 // rendered to PDF by the UI/browser or wkhtml-like path), HTML, CSV, JSON.
@@ -35,7 +35,7 @@ type Service struct {
 	Details  DetailSource
 }
 
-// Types of reports (§50) — aliases over the domain enum.
+// Types of reports — aliases over the domain enum.
 const (
 	TypeExecutive      = domain.ReportExecutive
 	TypeTechnical      = domain.ReportTechnical
@@ -241,7 +241,7 @@ func titleFor(def *domain.ReportDefinition) string {
 	}
 }
 
-// recommendations derives plain, evidence-based recommendations (§50).
+// recommendations derives plain, evidence-based recommendations.
 func recommendations(d *reportData) []string {
 	var out []string
 	crit := d.Summary["by_severity"].(map[string]int)
@@ -294,7 +294,7 @@ func renderCSV(d *reportData) ([]byte, string, error) {
 	return []byte(b.String()), "text/csv", w.Error()
 }
 
-// sanitizeCSV prevents formula injection in spreadsheet consumers (§146).
+// sanitizeCSV prevents formula injection in spreadsheet consumers.
 func sanitizeCSV(s string) string {
 	if s == "" {
 		return s

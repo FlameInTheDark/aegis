@@ -148,19 +148,25 @@ func (r *ScannerRepo) Upsert(ctx context.Context, s *domain.Scanner) error {
 }
 
 func (r *ScannerRepo) ByID(ctx context.Context, orgID, id string) (*domain.Scanner, error) {
-	q := r.db.Select("id, organization_id, COALESCE(site_id::text,'') AS site_id, name, version, capabilities, interfaces, health, COALESCE(transport,'nats') AS transport, is_default, last_seen, created_at").
+	q := r.db.Select(scannerListCols).
 		From("scanners").Where(squirrel.Eq{"id": id, "organization_id": orgID})
 	var s domain.Scanner
 	err := r.db.QueryRow(ctx, q).Scan(&s.ID, &s.OrganizationID, &s.SiteID, &s.Name,
-		&s.Version, &s.Capabilities, &s.Interfaces, &s.Health, &s.Transport, &s.IsDefault, &s.LastSeen, &s.CreatedAt)
+		&s.Version, &s.Capabilities, &s.Interfaces, &s.Health, &s.Transport, &s.IsDefault, &s.ConnectorID, &s.LastSeen, &s.CreatedAt)
 	if err != nil {
 		return nil, mapNotFound(err)
 	}
 	return &s, nil
 }
 
+// scannerListCols is the full projection for UI-facing reads; connector_id
+// resolves to ” for legacy rows (COALESCE keeps scanning simple).
+const scannerListCols = `id, organization_id, COALESCE(site_id::text,'') AS site_id, name, version,
+capabilities, interfaces, health, COALESCE(transport,'nats') AS transport, is_default,
+COALESCE(connector_id::text,'') AS connector_id, last_seen, created_at`
+
 func (r *ScannerRepo) List(ctx context.Context, orgID string) ([]domain.Scanner, error) {
-	q := r.db.Select("id, organization_id, COALESCE(site_id::text,'') AS site_id, name, version, capabilities, interfaces, health, COALESCE(transport,'nats') AS transport, is_default, last_seen, created_at").
+	q := r.db.Select(scannerListCols).
 		From("scanners").Where(squirrel.Eq{"organization_id": orgID}).OrderBy("name")
 	rows, err := r.db.Query(ctx, q)
 	if err != nil {
@@ -171,7 +177,7 @@ func (r *ScannerRepo) List(ctx context.Context, orgID string) ([]domain.Scanner,
 	for rows.Next() {
 		var s domain.Scanner
 		if err := rows.Scan(&s.ID, &s.OrganizationID, &s.SiteID, &s.Name, &s.Version,
-			&s.Capabilities, &s.Interfaces, &s.Health, &s.Transport, &s.IsDefault, &s.LastSeen, &s.CreatedAt); err != nil {
+			&s.Capabilities, &s.Interfaces, &s.Health, &s.Transport, &s.IsDefault, &s.ConnectorID, &s.LastSeen, &s.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -182,16 +188,64 @@ func (r *ScannerRepo) List(ctx context.Context, orgID string) ([]domain.Scanner,
 // scannerCols includes hub columns; scanning into domain.Scanner needs the
 // base fields only, so hub-only columns are selected explicitly per query.
 const scannerHubCols = `id, organization_id, COALESCE(site_id::text,'') AS site_id, name, version,
-capabilities, interfaces, health, last_seen, created_at`
+capabilities, interfaces, health, last_seen, COALESCE(connector_id::text,'') AS connector_id, created_at`
 
 func scanHubScanner(row scanner) (*domain.Scanner, error) {
 	var s domain.Scanner
 	err := row.Scan(&s.ID, &s.OrganizationID, &s.SiteID, &s.Name, &s.Version,
-		&s.Capabilities, &s.Interfaces, &s.Health, &s.LastSeen, &s.CreatedAt)
+		&s.Capabilities, &s.Interfaces, &s.Health, &s.LastSeen, &s.ConnectorID, &s.CreatedAt)
 	if err != nil {
 		return nil, mapNotFound(err)
 	}
 	return &s, nil
+}
+
+// ByConnectorID resolves the scanners row owned by a connector record
+// (connectors of kind=scanner own exactly one row).
+func (r *ScannerRepo) ByConnectorID(ctx context.Context, connectorID string) (*domain.Scanner, error) {
+	q := r.db.Select(scannerHubCols).From("scanners").Where(squirrel.Eq{"connector_id": connectorID})
+	return scanHubScanner(r.db.QueryRow(ctx, q))
+}
+
+// EnsureForConnector creates or refreshes the scanners row owned by a
+// connector (kind=scanner): name/site follow the connection record so the
+// UI keeps one source of truth for identity while the hub drives health.
+func (r *ScannerRepo) EnsureForConnector(ctx context.Context, s *domain.Scanner) error {
+	if s.ID == "" {
+		s.ID = ids.New()
+	}
+	q := r.db.Insert("scanners").
+		Columns("id", "organization_id", "site_id", "name", "version", "capabilities", "interfaces", "health", "last_seen", "transport", "connector_id").
+		Values(s.ID, s.OrganizationID, nullStr(s.SiteID), s.Name, s.Version, nonNil(s.Capabilities), nonNil(s.Interfaces), "offline", time.Now().UTC(), "connector", s.ConnectorID).
+		Suffix(`ON CONFLICT (connector_id) WHERE connector_id IS NOT NULL DO UPDATE SET
+                        organization_id = EXCLUDED.organization_id, site_id = EXCLUDED.site_id,
+                        name = EXCLUDED.name RETURNING id, created_at`)
+	return r.db.QueryRow(ctx, q).Scan(&s.ID, &s.CreatedAt)
+}
+
+// SetHealth flips the health column of one scanner (connector lifecycle:
+// revoke -> offline, re-arm -> healthy when the hub stream returns).
+func (r *ScannerRepo) SetHealth(ctx context.Context, id, health string) error {
+	q := r.db.Update("scanners").Set("health", health).Where(squirrel.Eq{"id": id})
+	_, err := r.db.Exec(ctx, q)
+	return err
+}
+
+// TouchConnector cascades connector-plane liveness onto the scanners row
+// owned by a kind=scanner connector: every connector heartbeat refreshes
+// last_seen and keeps the scanner healthy (or takes it offline when the
+// connector reported a graceful shutdown), so the scan UI sees
+// connector scanners without depending on the hub stream's slower
+// liveness path. Returns whether a linked row was updated.
+func (r *ScannerRepo) TouchConnector(ctx context.Context, connectorID, health string) (bool, error) {
+	q := r.db.Update("scanners").
+		Set("health", health).Set("last_seen", time.Now().UTC()).
+		Where(squirrel.Eq{"connector_id": connectorID})
+	tag, err := r.db.Exec(ctx, q)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // ByTokenHash resolves a scanner by the SHA-256 of its enrollment token.
@@ -258,8 +312,8 @@ func (r *ScannerRepo) Enroll(ctx context.Context, s *domain.Scanner, tokenHash s
 		Columns("id", "organization_id", "site_id", "name", "version", "capabilities", "interfaces", "health", "last_seen", "token_hash", "transport").
 		Values(s.ID, s.OrganizationID, nullStr(s.SiteID), s.Name, s.Version, nonNil(s.Capabilities), nonNil(s.Interfaces), "offline", time.Now().UTC(), tokenHash, "grpc").
 		Suffix(`ON CONFLICT (organization_id, name) DO UPDATE SET
-			site_id = EXCLUDED.site_id, token_hash = EXCLUDED.token_hash,
-			transport = 'grpc', health = 'offline' RETURNING id, created_at`)
+                        site_id = EXCLUDED.site_id, token_hash = EXCLUDED.token_hash,
+                        transport = 'grpc', health = 'offline' RETURNING id, created_at`)
 	return r.db.QueryRow(ctx, q).Scan(&s.ID, &s.CreatedAt)
 }
 
@@ -411,9 +465,22 @@ func (r *ScanRepo) AssignScanner(ctx context.Context, scanID, scannerID string) 
 
 func (r *ScanRepo) UpdateState(ctx context.Context, id string, state domain.ScanState, phase string, progress float64) error {
 	fields := squirrel.Eq{}
-	set := map[string]any{"state": state, "phase": phase, "progress": progress}
+	set := map[string]any{"state": state, "phase": phase}
+	// progress < 0 = "not reported, keep the current value"; a completed
+	// scan is always clamped to 100 so no completion path can regress it.
+	switch {
+	case state == domain.ScanCompleted:
+		set["progress"] = 100.0
+	case progress >= 0:
+		set["progress"] = progress
+	}
 	if state == domain.ScanRunning {
 		set["started_at"] = time.Now().UTC()
+		// (Re)entering running clears a stale error: a scan swept by
+		// startup recovery whose executor is actually still alive keeps
+		// reporting progress and must not keep "interrupted by restart"
+		// on the row.
+		set["error"] = nil
 	}
 	if state == domain.ScanCompleted || state == domain.ScanFailed || state == domain.ScanCancelled {
 		set["completed_at"] = time.Now().UTC()
@@ -470,6 +537,36 @@ func (r *ScanRepo) ActiveBySite(ctx context.Context, siteID string) ([]domain.Sc
 	return out, rows.Err()
 }
 
+// FailStaleActive fails every scan left in an active state by an executor
+// that died mid-run (a system restart while the scan was running) and
+// returns the swept rows for logging. Active means running or cancelling:
+// queued scans are re-claimed by the executor loop after a restart, and
+// terminal states are never touched. The reason string is stored on the
+// scan row and shown in the UI ("interrupted by restart").
+func (r *ScanRepo) FailStaleActive(ctx context.Context, reason string) ([]domain.Scan, error) {
+	q := r.db.Update("scans").
+		Set("state", domain.ScanFailed).
+		Set("phase", "failed").
+		Set("error", reason).
+		Set("completed_at", time.Now().UTC()).
+		Where(squirrel.Eq{"state": []domain.ScanState{domain.ScanRunning, domain.ScanCancelling}}).
+		Suffix("RETURNING id, organization_id, name")
+	rows, err := r.db.Query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Scan
+	for rows.Next() {
+		var s domain.Scan
+		if err := rows.Scan(&s.ID, &s.OrganizationID, &s.Name); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // ==================================================================== scan tasks
 
 type TaskRepo struct{ db *DB }
@@ -503,6 +600,25 @@ func (r *TaskRepo) UpdateState(ctx context.Context, id string, state domain.Task
 		q = q.Set(k, v)
 	}
 	q = q.Where(squirrel.Eq{"id": id})
+	_, err := r.db.Exec(ctx, q)
+	return err
+}
+
+// FailStaleByScans fails the non-terminal tasks of swept scans so a scan
+// closed by startup recovery no longer shows in-flight steps from a dead
+// run. Empty id list is a no-op.
+func (r *TaskRepo) FailStaleByScans(ctx context.Context, scanIDs []string, reason string) error {
+	if len(scanIDs) == 0 {
+		return nil
+	}
+	q := r.db.Update("scan_tasks").
+		Set("state", domain.TaskFailed).
+		Set("error", reason).
+		Set("finished_at", time.Now().UTC()).
+		Where(squirrel.Eq{"scan_id": scanIDs}).
+		Where(squirrel.Eq{"state": []domain.TaskState{
+			domain.TaskPending, domain.TaskDispatched, domain.TaskRunning, domain.TaskRetrying,
+		}})
 	_, err := r.db.Exec(ctx, q)
 	return err
 }

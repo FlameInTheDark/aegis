@@ -1,5 +1,5 @@
 // Package feeds implements the vulnerability intelligence synchronization
-// worker (spec §27-§31): scheduled jobs with initial bootstrap, incremental
+// worker: scheduled jobs with initial bootstrap, incremental
 // sync, retry/backoff, outage tolerance, metrics and provenance for every
 // record. Feeds never run inside user requests.
 package feeds
@@ -39,7 +39,7 @@ func NewClient(log *slog.Logger) *Client {
 	return &Client{HTTP: &http.Client{Timeout: 90 * time.Second}, Log: log}
 }
 
-// FetchJSON retrieves a URL with retry/backoff (§30).
+// FetchJSON retrieves a URL with retry/backoff.
 func (c *Client) FetchJSON(ctx context.Context, url string, maxBytes int64, retries int) ([]byte, error) {
 	return c.FetchJSONHdr(ctx, url, maxBytes, retries, nil)
 }
@@ -211,7 +211,7 @@ func (r *Runner) release(name string) {
 	}
 }
 
-// RunAll executes every job concurrently (§30). Sequential execution used to
+// RunAll executes every job concurrently. Sequential execution used to
 // starve everything queued behind a slow feed: the NVD full pull runs tens
 // of minutes, so cvelistv5 sat at "never_synced" for hours behind it. A feed
 // that is already running (boot sync + ticker overlap, or a manual trigger)
@@ -310,7 +310,7 @@ func (r *Runner) RunOne(ctx context.Context, job FeedJob, full bool) (err error)
 	return err
 }
 
-// storeRaw keeps the original upstream payload for provenance (§115).
+// storeRaw keeps the original upstream payload for provenance.
 func (r *Runner) storeRaw(ctx context.Context, name string, day time.Time, data []byte) string {
 	if r.Store == nil {
 		return ""
@@ -394,7 +394,7 @@ func (j *KEVJob) Sync(ctx context.Context, full bool) (int, int, int, int, error
 // ---------------------------------------------------------------------------
 // EPSS
 
-// EPSSJob syncs FIRST EPSS daily snapshots (§36: daily snapshots, not severity).
+// EPSSJob syncs FIRST EPSS daily snapshots (daily snapshots, not severity).
 type EPSSJob struct {
 	Client *Client
 	Vulns  *pg.VulnRepo
@@ -716,7 +716,7 @@ func (j *NVDJob) Sync(ctx context.Context, full bool) (int, int, int, int, error
 				return processed, created, updated, rejected, fmt.Errorf("nvd references batch: %w", err)
 			}
 			// New-vs-updated is approximated by the previous sync position
-			// (documented assumption §191).
+			// (documented assumption).
 			if lastSync.IsZero() {
 				created += len(batch)
 			} else {

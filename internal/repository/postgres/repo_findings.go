@@ -11,6 +11,47 @@ import (
 	"github.com/FlameInTheDark/aegis/internal/ids"
 )
 
+// OpenSeverityByOrg aggregates OPEN finding counts per asset and severity
+// (org-wide, optionally site-scoped). The assets list renders per-row
+// critical/high badges from this single aggregate instead of N queries.
+type SeverityCount struct {
+	AssetID  string
+	Severity domain.Severity
+	Count    int64
+}
+
+func (r *FindingRepo) OpenSeverityByOrg(ctx context.Context, orgID, siteID string) ([]SeverityCount, error) {
+	// "Open" = not yet resolved/accepted/suppressed — the same set the
+	// asset-detail findings_count uses, so list badges and detail agree.
+	where := squirrel.Eq{"f.organization_id": orgID}
+	openConds := squirrel.Or{
+		squirrel.Eq{"f.status": "open"},
+		squirrel.Eq{"f.status": "acknowledged"},
+		squirrel.Eq{"f.status": "in_progress"},
+	}
+	if siteID != "" {
+		where["a.site_id"] = siteID
+	}
+	q := r.db.Select("f.asset_id::text", "f.severity", "count(*)").
+		From("findings f").Join("assets a ON a.id = f.asset_id").
+		Where(squirrel.And{where, openConds}).
+		GroupBy("f.asset_id", "f.severity")
+	rows, err := r.db.Query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SeverityCount
+	for rows.Next() {
+		var c SeverityCount
+		if err := rows.Scan(&c.AssetID, &c.Severity, &c.Count); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // ==================================================================== findings
 
 type FindingRepo struct{ db *DB }
@@ -44,13 +85,17 @@ func (r *FindingRepo) Upsert(ctx context.Context, f *domain.Finding) error {
 	}
 	q := r.db.Insert("findings").
 		Columns("id", "organization_id", "asset_id", "service_id", "software_id", "cve_id",
-			"osv_id", "title", "match_type", "confidence", "risk_score", "severity", "status").
+			"osv_id", "title", "match_type", "confidence", "risk_score", "severity", "status", "remediation").
 		Values(f.ID, f.OrganizationID, f.AssetID, nullPtrID(f.ServiceID), nullPtrID(f.SoftwareID),
 			nullStr(f.CVEID), nullStr(f.OSVID), f.Title, f.MatchType, f.Confidence,
-			f.RiskScore, f.Severity, f.Status).
+			f.RiskScore, f.Severity, f.Status, f.Remediation).
 		Suffix(`ON CONFLICT (asset_id, (COALESCE(cve_id, '')), (COALESCE(service_id::text, ''))) DO UPDATE SET
                         title = EXCLUDED.title,
                         match_type = EXCLUDED.match_type,
+                        -- a match that knows the exact fix (e.g. the advisory
+                        -- plane's "Upgrade openssl to X (USN-...)") wins over
+                        -- the generic text; empty never blanks an existing one
+                        remediation = CASE WHEN COALESCE(EXCLUDED.remediation, '') <> '' THEN EXCLUDED.remediation ELSE findings.remediation END,
                         confidence = EXCLUDED.confidence,
                         risk_score = EXCLUDED.risk_score,
                         severity = EXCLUDED.severity,
@@ -70,7 +115,7 @@ func (r *FindingRepo) ByID(ctx context.Context, orgID, id string) (*domain.Findi
 	return scanFinding(r.db.QueryRow(ctx, q))
 }
 
-// FindingFilter constrains finding listings (spec §118).
+// FindingFilter constrains finding listings.
 type FindingFilter struct {
 	OrgID    string
 	SiteID   string
@@ -396,7 +441,7 @@ func nullPtrStr(s *string) any {
 	return *s
 }
 
-// StatusHistory returns the status-change trail of a finding (§38).
+// StatusHistory returns the status-change trail of a finding.
 func (r *FindingRepo) StatusHistory(ctx context.Context, findingID string) ([]domain.FindingStatusChange, error) {
 	q := r.db.Select("id", "finding_id", "from_state", "to_state", "changed_by", "reason", "created_at").
 		From("finding_status_history").Where(squirrel.Eq{"finding_id": findingID}).

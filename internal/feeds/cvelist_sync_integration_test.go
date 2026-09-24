@@ -127,7 +127,10 @@ func TestIntegrationCVELISTSync(t *testing.T) {
 	}
 	defer db.Close()
 	ctx := context.Background()
-	if _, err := pool.Exec(ctx, "TRUNCATE vulnerabilities, vulnerability_cpe_matches"); err != nil {
+	// CASCADE: findings (a later migration) references vulnerabilities(cve_id),
+	// and TRUNCATE refuses to touch a table referenced by an FK it does not
+	// list — every sync test run failed on 0A000 before it started.
+	if _, err := pool.Exec(ctx, "TRUNCATE vulnerabilities, vulnerability_cpe_matches CASCADE"); err != nil {
 		t.Fatalf("truncate: %v", err)
 	}
 
@@ -179,7 +182,11 @@ func TestIntegrationCVELISTSync(t *testing.T) {
 	}
 
 	// 2. Same-day incremental: delta only — full snapshot must NOT be pulled.
-	now := time.Date(2026, 9, 16, 18, 53, 0, 0, time.UTC)
+	// "Same day" is decided against the real clock (cvelistPlan compares the
+	// last-sync time with today's UTC midnight), so the test must use the
+	// actual time — a hardcoded 2026 date went stale the moment the calendar
+	// moved on and the sync re-bootstrapped every run.
+	now := time.Now().UTC().Add(-time.Minute)
 	last.Store(now)
 	p, c, _, _, err = job.Sync(ctx, false)
 	if err != nil {

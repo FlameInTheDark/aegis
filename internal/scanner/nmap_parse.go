@@ -8,7 +8,7 @@ import (
 
 // nmapRun is the subset of nmap XML output (-oX -) that we consume.
 // Parsing is deliberately tolerant: scanner output is untrusted input
-// (§146) — malformed fields become empty strings, never errors.
+// — malformed fields become empty strings, never errors.
 type nmapOSClass struct {
 	Type   string `xml:"type,attr"`
 	Vendor string `xml:"vendor,attr"`
@@ -102,6 +102,9 @@ func parseNmapDiscovery(data []byte) ([]HostResult, error) {
 			case "mac":
 				hr.MAC = a.Addr
 				if a.Vendor != "" {
+					// nmap resolved the OUI organization - keep the real
+					// string (previously only the device hint survived).
+					hr.MACVendor = a.Vendor
 					hr.Device = deviceHintFromVendor(a.Vendor)
 				}
 			}
@@ -196,6 +199,18 @@ func parseNmapOS(data []byte) (*OSResult, error) {
 		return nil, fmt.Errorf("nmap xml: %w", err)
 	}
 	for _, h := range run.Hosts {
+		// -O runs on-link targets carry the MAC (+ OUI vendor) in the
+		// address records; capture it so hosts whose MAC was missed at
+		// discovery still link it to the inventory.
+		var hostMAC, hostMACVendor string
+		for _, a := range h.Addresses {
+			if a.AddrType == "mac" {
+				hostMAC = a.Addr
+				if a.Vendor != "" {
+					hostMACVendor = a.Vendor
+				}
+			}
+		}
 		best := -1
 		for i, m := range h.OS.OSMatch {
 			if best < 0 || m.Accuracy > h.OS.OSMatch[best].Accuracy {
@@ -204,7 +219,7 @@ func parseNmapOS(data []byte) (*OSResult, error) {
 		}
 		if best >= 0 {
 			m := h.OS.OSMatch[best]
-			res := &OSResult{Name: m.Name, Confidence: float64(m.Accuracy) / 100}
+			res := &OSResult{Name: m.Name, Confidence: float64(m.Accuracy) / 100, MAC: hostMAC, MACVendor: hostMACVendor}
 			for _, c := range m.OSClass {
 				if res.Family == "" {
 					res.Family = strings.ToLower(c.Family)
@@ -224,6 +239,7 @@ func parseNmapOS(data []byte) (*OSResult, error) {
 				Family:     strings.ToLower(c.Family),
 				Device:     deviceTypeFromNmap(c.Type),
 				Confidence: 0.5,
+				MAC:        hostMAC, MACVendor: hostMACVendor,
 			}, nil
 		}
 	}

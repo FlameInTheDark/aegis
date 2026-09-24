@@ -4,13 +4,16 @@ package aegis.agent.v1;
 
 option go_package = "github.com/FlameInTheDark/aegis/api/gen/aegis/agent/v1;agentv1";
 
-// AgentService is the endpoint agent <-> control plane protocol (spec §136).
-// Transport is gRPC over TLS. Agents authenticate with device certificates
-// issued at enrollment; private keys never leave the endpoint.
+// AgentService is the endpoint DATA-PLANE protocol: inventory submission,
+// typed task polling and telemetry for agent-kind connectors. It carries NO
+// enrollment of its own since v1.24.0 — identity is established through the
+// unified ConnectorService (one-time connect token -> long-lived secret ->
+// BindDevice for the device certificate). Every RPC here authenticates with
+// the connector credentials (x-aegis-connector-id / x-aegis-connector-secret
+// metadata) and is resolved to the connector's BOUND DEVICE record: a
+// client-asserted agent_id is ignored, so this plane cannot be used to
+// impersonate another endpoint.
 service AgentService {
-  // Enroll exchanges a one-time enrollment token plus a CSR for a device
-  // certificate. Called once per endpoint.
-  rpc Enroll(EnrollRequest) returns (EnrollResponse);
   // GetConfig returns the agent's collection configuration.
   rpc GetConfig(GetConfigRequest) returns (AgentConfig);
   // Heartbeat reports liveness and basic runtime state.
@@ -23,31 +26,19 @@ service AgentService {
   rpc SubmitNetworkState(NetworkStateReport) returns (SubmitResponse);
   // SubmitSecurityPosture reports firewall/AV/encryption state.
   rpc SubmitSecurityPosture(SecurityPostureReport) returns (SubmitResponse);
+  // SubmitMetrics reports a performance sample (CPU, memory, network
+  // throughput) for the bound device; stored in the ClickHouse metrics tier.
+  rpc SubmitMetrics(MetricsReport) returns (SubmitResponse);
+  // SubmitMetricsBatch reports several performance samples collected at the
+  // probe rate and flushed together at the pull rate; stored in the
+  // ClickHouse metrics tier as one insert.
+  rpc SubmitMetricsBatch(MetricsBatchReport) returns (SubmitResponse);
   // PollTasks fetches pending typed tasks (spec §19: no remote shell).
   rpc PollTasks(PollTasksRequest) returns (PollTasksResponse);
   // CompleteTask reports a task result.
   rpc CompleteTask(CompleteTaskRequest) returns (SubmitResponse);
   // StreamEvents streams telemetry events to the platform.
   rpc StreamEvents(stream AgentEvent) returns (SubmitResponse);
-}
-
-message EnrollRequest {
-  string token = 1;          // one-time enrollment token
-  string csr_pem = 2;        // CSR generated on the endpoint (public key only)
-  string hostname = 3;
-  string platform = 4;       // windows | linux | darwin
-  string platform_version = 5;
-  string arch = 6;
-  string agent_version = 7;
-  string machine_id = 8;     // stable local identifier
-}
-
-message EnrollResponse {
-  string agent_id = 1;
-  string certificate_pem = 2; // device certificate signed by platform CA
-  string org_id = 3;
-  string site_id = 4;
-  int32 heartbeat_interval_secs = 5;
 }
 
 message GetConfigRequest { string agent_id = 1; }
@@ -87,6 +78,9 @@ message InventoryReport {
   string machine_id = 14;
   repeated Iface interfaces = 15;
   repeated Disk disks = 16;
+  // Source address of the management connection to the hub (the endpoint's
+  // own view of which interface/IP it talks on); empty when undeterminable.
+  string primary_ip = 17;
 }
 
 message Iface {
@@ -144,6 +138,45 @@ message SecurityPostureReport {
   string auto_updates = 7;     // enabled|disabled|unknown
   string secure_boot = 8;      // enabled|disabled|unknown
   repeated string local_admins = 9;
+}
+
+// MetricsReport is one performance sample of the bound device, taken over
+// the interval since the previous sample. rx_bps/tx_bps are pre-computed
+// byte rates over that interval (0 on the first sample after start);
+// rx_bytes/tx_bytes are the absolute NIC counters.
+message MetricsReport {
+  string agent_id = 1;
+  int64 collected_at_unix = 2;  // sample timestamp, unix seconds
+  double cpu_percent = 3;       // system-wide CPU utilization, 0-100
+  uint64 memory_total = 4;      // bytes
+  uint64 memory_used = 5;       // bytes
+  uint64 memory_available = 6;  // bytes
+  double load1 = 7;             // load averages; 0 where unsupported (windows)
+  double load5 = 8;
+  double load15 = 9;
+  uint64 uptime_secs = 10;
+  repeated IfaceMetrics interfaces = 11;
+}
+
+message IfaceMetrics {
+  string name = 1;
+  string mac = 2;
+  uint64 rx_bytes = 3;
+  uint64 tx_bytes = 4;
+  double rx_bps = 5;   // bytes per second over the sample interval
+  double tx_bps = 6;
+  uint64 rx_packets = 7;
+  uint64 tx_packets = 8;
+}
+
+// MetricsBatchReport carries several performance samples taken between two
+// pulls (the batch-send interval). The agent collects one sample per probe
+// interval and flushes the buffered samples together, so a fast probe rate
+// does not turn into one RPC per sample. agent_id is informational: the
+// server resolves the bound device from the connection credentials.
+message MetricsBatchReport {
+  string agent_id = 1;
+  repeated MetricsReport samples = 2;
 }
 
 message PollTasksRequest { string agent_id = 1; }

@@ -1,6 +1,6 @@
 // Package telemetry implements event ingestion: sensor events flow
 // NATS -> normalizing adapters -> ClickHouse (analytics) with detection
-// evaluation (spec §2 workers, §23, §40).
+// evaluation (workers).
 package telemetry
 
 import (
@@ -19,7 +19,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-// Subjects for telemetry ingestion (spec §78).
+// Subjects for telemetry ingestion.
 const (
 	SubjectSensorEvent = "security.sensor.event.v1"
 	SubjectAgentEvent  = "security.agent.telemetry.v1"
@@ -87,7 +87,7 @@ func (in *Ingestor) Normalize(se SubjectEvent) ([]domain.Event, error) {
 		ev, err := adapter.Parse(line, se.TenantID, se.SiteID, se.SensorID)
 		if err != nil {
 			in.Log.Debug("record rejected", "source", se.Source, "err", err)
-			continue // partial failure: keep going (§30 semantics)
+			continue // partial failure: keep going
 		}
 		out = append(out, *ev)
 		if in.BatchSize > 0 && len(out) >= in.BatchSize {
@@ -169,7 +169,7 @@ func (in *Ingestor) PublishEvent(ctx context.Context, se SubjectEvent) error {
 }
 
 // HTTPIngest handles the synchronous API ingestion path with size caps
-// and dedup (spec §104: oversized events, duplication, replay).
+// and dedup (oversized events, duplication, replay).
 func (in *Ingestor) HTTPIngest(ctx context.Context, se SubjectEvent) (int, error) {
 	if len(se.Raw) > 8<<20 {
 		return 0, fmt.Errorf("payload exceeds 8MiB limit")
@@ -194,7 +194,7 @@ func (in *Ingestor) HTTPIngest(ctx context.Context, se SubjectEvent) (int, error
 }
 
 // HTTPIngestSize validates payload size independently (used by tests and
-// the API layer's pre-check, spec §104 oversized events).
+// the API layer's pre-check, oversized events).
 func (in *Ingestor) HTTPIngestSize(raw []byte) (int, error) {
 	if len(raw) > 8<<20 {
 		return 0, fmt.Errorf("payload exceeds 8MiB limit")

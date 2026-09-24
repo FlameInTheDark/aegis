@@ -212,3 +212,28 @@ ENGINE = MergeTree
 PARTITION BY toYYYYMM(timestamp)
 ORDER BY (timestamp, tenant_id, rule_id)
 TTL toDateTime(timestamp) + INTERVAL 180 DAY;
+
+CREATE TABLE IF NOT EXISTS aegis.device_metrics
+(
+    tenant_id      UUID,
+    site_id        UUID,
+    agent_id       UUID,
+    asset_id       UUID DEFAULT toUUID('00000000-0000-0000-0000-000000000000'),
+    timestamp      DateTime64(3, 'UTC'),
+    cpu_percent    Float32 DEFAULT 0,
+    rx_bps         Float32 DEFAULT 0,   -- device-total receive rate over the sample interval
+    tx_bps         Float32 DEFAULT 0,   -- device-total transmit rate
+    mem_total      UInt64 DEFAULT 0,
+    mem_used       UInt64 DEFAULT 0,
+    mem_available  UInt64 DEFAULT 0,
+    load1          Float32 DEFAULT 0,
+    load5          Float32 DEFAULT 0,
+    load15         Float32 DEFAULT 0,
+    uptime_secs    UInt64 DEFAULT 0,
+    interfaces     String DEFAULT '' CODEC(ZSTD(3))  -- JSON array of per-NIC counters/rates
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(timestamp)
+ORDER BY (timestamp, tenant_id, agent_id)
+TTL toDateTime(timestamp) + INTERVAL 30 DAY
+SETTINGS index_granularity = 8192;

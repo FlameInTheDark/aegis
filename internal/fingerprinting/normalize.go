@@ -1,5 +1,5 @@
-// Package fingerprinting implements product identity normalization
-// (spec §33): raw vendor/product/version strings from scanners, banners
+// Package fingerprinting implements product identity normalization:
+// raw vendor/product/version strings from scanners, banners
 // and agents are canonicalized before vulnerability matching. It never
 // guesses aggressively — unknown stays unknown.
 package fingerprinting
@@ -177,7 +177,7 @@ func NormalizeVersion(raw string) string {
 	if versionRe.MatchString(v) {
 		return v
 	}
-	// Not version-like: return empty — never pretend (§33).
+	// Not version-like: return empty — never pretend.
 	return ""
 }
 

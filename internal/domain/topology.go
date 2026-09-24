@@ -4,7 +4,7 @@ import (
 	"time"
 )
 
-// NodeKind is a topology node type (spec §24).
+// NodeKind is a topology node type.
 type NodeKind string
 
 const (

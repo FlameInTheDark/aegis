@@ -1,6 +1,6 @@
 # Scanner architecture
 
-## Safety model (spec §13)
+## Safety model
 
 | Profile | Discovery | Ports | Service detect | OS detect | NSE | Validation | Requires |
 |---|---|---|---|---|---|---|---|
@@ -39,9 +39,9 @@ appends to service fingerprints (`cpe:/o:linux:linux_kernel`, the "Service
 Info: OS: Linux" line) feeds `os_family`/`os_name` even on hosts whose raw
 `-O` probes are filtered — typical for container-born scans.
 
-Every scan records its exact, reproducible configuration (§11). Cancellation polls the kill switch between probes.
+Every scan records its exact, reproducible configuration. Cancellation polls the kill switch between probes.
 
-## Scope safety (spec §70)
+## Scope safety
 
 `internal/scanning/scope.go` normalizes and validates every target set before execution:
 
@@ -51,21 +51,28 @@ Every scan records its exact, reproducible configuration (§11). Cancellation po
 - hostname SSRF/injection screening (localhost, metadata endpoints, shell metacharacters),
 - denylist overrides everything.
 
-## Engine adapters (spec §12)
+## Engine adapters
 
 External engines are wrapped, never reimplemented: `internal/scanner`.
 
-- **Nmap** (`NmapEngine`) — `-sn` discovery, `-sS` SYN port scan, `-sV --version-intensity 5` fingerprinting (plus a batched `-sV --version-light` pass for light profiles), `-O --osscan-guess` with bounded port specs (no `--osscan-limit`: it skips hosts whose closed ports NAT renders as filtered), NSE restricted to `--script safe` (never `vuln`/`exploit` categories, §145).
+- **Nmap** (`NmapEngine`) — `-sn` discovery, `-sS` SYN port scan, `-sV --version-intensity 5` fingerprinting (plus a batched `-sV --version-light` pass for light profiles), `-O --osscan-guess` with bounded port specs (no `--osscan-limit`: it skips hosts whose closed ports NAT renders as filtered), NSE restricted to `--script safe` (never `vuln`/`exploit` categories).
 - **Simulated** (`SimulatedEngine`) — deterministic synthetic results for demo mode, tests and air-gapped evaluation; all records tagged `simulated`.
 - ZGrab2 / Nuclei extension points follow the same adapter shape (typed config → argument arrays).
 
-All external execution (§12/§82/§71): `exec.CommandContext`, argument arrays (never a shell), validated targets, hard runtime timeout, capped stdout/stderr, exit codes captured, stderr separated, engine versions recorded.
+Engine selection is identical for the embedded scanner and connector scanners:
+nmap is located via `scanner.DetectNmapPath` (PATH first, then the usual install
+locations on Linux/macOS/Windows — an explicitly configured `nmap_path`/`AEGIS_SCANNER_NMAP_PATH`/`AEGIS_NMAP_PATH` always wins). Only when no binary can be
+found does the engine degrade to `simulated`, and never silently: the component
+logs a loud warning and reports the reason in its heartbeat status
+(`engine_detail`), so synthetic results cannot pass unnoticed.
 
-## Distributed scanners (spec §69)
+All external execution: `exec.CommandContext`, argument arrays (never a shell), validated targets, hard runtime timeout, capped stdout/stderr, exit codes captured, stderr separated, engine versions recorded.
 
-Scanners register with `{scanner_id, site_id, capabilities[], version, health, last_seen}` and are site-bound so the scheduler only dispatches work they can actually reach. Capabilities: `ipv4 ipv6 raw_packets snmp nmap zgrab nuclei masscan simulated`.
+## Distributed scanners
 
-## Resource limits (spec §71)
+Scanners register with `{scanner_id, site_id, capabilities[], version, health, last_seen}` and are site-bound so the scheduler only dispatches work they can actually reach. Capabilities: `ipv4 ipv6 raw_packets snmp nmap zgrab nuclei masscan simulated`. The `version` field is `<binary version>/<engine>` (e.g. `1.5.2/nmap`, `1.5.2/simulated`) — the Settings → Scanners registry and the scan dialog render the engine suffix explicitly so a simulated scanner is distinguishable at a glance.
+
+## Resource limits
 
 | Limit | Default |
 |---|---|
@@ -74,6 +81,6 @@ Scanners register with `{scanner_id, site_id, capabilities[], version, health, l
 | max targets per scan | profile-bound (4096–8192) |
 | max packet rate | profile-bound (100–300 pps) |
 
-## Change detection (spec §26)
+## Change detection
 
 Observations flow through the inventory service which records deltas (`NEW_ASSET`, `SERVICE_OPENED`, `VERSION_CHANGED`, …) shown per site and per scan.

@@ -1,5 +1,5 @@
 // Package vulnerabilities implements the vulnerability matching engine
-// (spec §32) — one of the most important parts of the product. It turns
+// — one of the most important parts of the product. It turns
 // observed services/packages into candidate CVEs with explicit match type,
 // confidence and evidence. Heuristic matches are never presented as
 // confirmed vulnerabilities.
@@ -21,7 +21,8 @@ type MatchInput struct {
 	SoftwareID  string
 	Vendor      string
 	Product     string
-	Version     string // may be empty
+	Version     string // may be empty; the normalized form when the caller normalized at ingestion
+	RawVersion  string // the version exactly as collected, for evidence; empty when equal to Version
 	CPEs        []string
 	Ecosystem   string // for packages: npm, pypi, go, os_debian...
 	PackageName string
@@ -37,6 +38,10 @@ type Match struct {
 	Confidence domain.Confidence
 	Reason     string
 	Evidence   map[string]any
+	// Remediation overrides the generic remediation text when the match
+	// knows the exact fix (e.g. "Upgrade openssl to 3.0.2-0ubuntu1.16
+	// (USN-6800-1)").
+	Remediation string
 }
 
 // Index is the read-side view over the local vulnerability store. The
@@ -70,7 +75,7 @@ func (m *Matcher) Match(ctx context.Context, in MatchInput) ([]Match, error) {
 		max = 50
 	}
 
-	// Package ecosystems use OSV-aware matching (spec §34).
+	// Package ecosystems use OSV-aware matching.
 	if in.Ecosystem != "" && in.PackageName != "" {
 		return m.matchPackage(ctx, in, max)
 	}
@@ -84,15 +89,22 @@ func (m *Matcher) matchPackage(ctx context.Context, in MatchInput, max int) ([]M
 	}
 	out := make([]Match, 0, len(advs))
 	for _, adv := range advs {
-		affected, mt, conf, reason := osvAffects(adv, in.PackageName, in.Version)
+		affected, mt, conf, reason, boundEv := osvAffects(adv, in.PackageName, in.Version)
 		if !affected {
 			continue
 		}
 		for _, cve := range adv.CVEIDs {
+			ev := map[string]any{"osv_id": adv.ID, "ecosystem": in.Ecosystem, "package": in.PackageName, "version": in.Version}
+			if in.RawVersion != "" && in.RawVersion != in.Version {
+				ev["version_raw"] = in.RawVersion
+			}
+			for k, v := range boundEv {
+				ev[k] = v
+			}
 			out = append(out, Match{
 				CVEID: cve, OSVID: adv.ID, MatchType: mt, Confidence: conf,
 				Reason:   reason,
-				Evidence: map[string]any{"osv_id": adv.ID, "ecosystem": in.Ecosystem, "package": in.PackageName, "version": in.Version},
+				Evidence: ev,
 			})
 		}
 		if len(adv.CVEIDs) == 0 {
@@ -107,13 +119,13 @@ func (m *Matcher) matchPackage(ctx context.Context, in MatchInput, max int) ([]M
 }
 
 // osvAffects decides whether a version is inside an OSV advisory's ranges.
-func osvAffects(adv domain.OSVRecord, pkg, version string) (bool, domain.MatchType, domain.Confidence, string) {
+func osvAffects(adv domain.OSVRecord, pkg, version string) (bool, domain.MatchType, domain.Confidence, string, map[string]any) {
 	if version == "" {
 		// Version unknown: potential only. Do not claim confirmed.
-		return true, domain.MatchHeuristic, 0.3, "Package " + pkg + " matches advisory without a version pin (potential, not confirmed)"
+		return true, domain.MatchHeuristic, 0.3, "Package " + pkg + " matches advisory without a version pin (potential, not confirmed)", nil
 	}
 	if len(adv.AffectedRanges) == 0 {
-		return true, domain.MatchHeuristic, 0.4, "Advisory lists package without machine-readable ranges (potential)"
+		return true, domain.MatchHeuristic, 0.4, "Advisory lists package without machine-readable ranges (potential)", nil
 	}
 	evaluated := false
 	for _, r := range adv.AffectedRanges {
@@ -121,20 +133,41 @@ func osvAffects(adv domain.OSVRecord, pkg, version string) (bool, domain.MatchTy
 			continue // commit ranges carry no version ordering to evaluate
 		}
 		evaluated = true
-		if inRange(r, version, adv.Ecosystem) {
-			return true, domain.MatchPackageVersion, 0.9, "Version " + version + " falls inside affected range of " + adv.ID
+		if in, verdict, constraint := inRange(r, version, adv.Ecosystem); in {
+			reason := "Version " + version + " falls inside affected range of " + adv.ID
+			ev := map[string]any{}
+			if constraint != nil {
+				ev["constraint"] = *constraint
+			}
+			if verdict != nil {
+				ev["bound_domain"] = string(verdict.Domain)
+				reason += " (" + string(verdict.Domain) + " ordering)"
+				if verdict.Projected != "" {
+					ev["projected_version"] = verdict.Projected
+				}
+			}
+			return true, domain.MatchPackageVersion, 0.9, reason, ev
 		}
 	}
 	if !evaluated {
-		return true, domain.MatchHeuristic, 0.4, "Advisory only lists commit ranges; version " + version + " cannot be evaluated (potential)"
+		return true, domain.MatchHeuristic, 0.4, "Advisory only lists commit ranges; version " + version + " cannot be evaluated (potential)", nil
 	}
-	return false, "", 0, ""
+	return false, "", 0, "", nil
 }
 
-// inRange evaluates introduced/fixed/last_affected events against a version,
-// using the OSV ecosystem's ordering rules (semver for npm, dpkg for Debian,
-// rpmvercmp for Red Hat families, PEP 440 for PyPI, …).
-func inRange(r domain.VersionRange, version, ecosystem string) bool {
+// inRange evaluates the domain-tagged VersionConstraint of one OSV range
+// against the version under judgment. The constraint is built per the OSV
+// event model (introduced/fixed/last_affected, "0" dropped) and every bound
+// is compared through ComparePackageBound, which resolves the comparison
+// domain per bound: a distro-format bound ("1:10.0p1-5ubuntu5.5") orders
+// fully under the distro grammar, while an upstream-only bound — the
+// "affected < 10.5" shape of OpenSSH CVEs — is projected to the installed
+// package's upstream component first and decided in the structured OpenSSH
+// domain when both sides are OpenSSH releases. Incomparable bounds never
+// match (never guess). Returns whether the version falls inside, the
+// deciding bound's verdict (nil when the range carries no version bounds)
+// and the constraint for evidence.
+func inRange(r domain.VersionRange, version, ecosystem string) (bool, *fingerprinting.BoundVerdict, *domain.VersionConstraint) {
 	var introduced, fixed, lastAffected string
 	for _, e := range r.Events {
 		if e.Introduced != "" {
@@ -150,41 +183,65 @@ func inRange(r domain.VersionRange, version, ecosystem string) bool {
 	if introduced == "0" {
 		introduced = ""
 	}
-	cmpIntro, cmpFixed := 0, 0
+	if introduced == "" && fixed == "" && lastAffected == "" {
+		return false, nil, nil
+	}
+	constraint := domain.VersionConstraint{
+		// The ecosystem label resolves the DEFAULT domain; the deciding
+		// bound's verdict overwrites it below, so the constraint names the
+		// domain the applicability call was actually made in (an Ubuntu
+		// OSV record with an upstream-only OpenSSH bound reports
+		// {Domain: openssh, Fixed: "10.5"}).
+		Domain:          fingerprinting.DomainForEcosystem(ecosystem),
+		Introduced:      introduced,
+		Fixed:           fixed,
+		LessThanOrEqual: lastAffected,
+	}
+	var deciding *fingerprinting.BoundVerdict
+	evaluate := func(bound string, inside func(c int) bool) bool {
+		v := fingerprinting.ComparePackageBound(version, bound, ecosystem)
+		deciding = &v
+		constraint.Domain = v.Domain
+		return v.Compare != 2 && inside(v.Compare)
+	}
 	if introduced != "" {
-		cmpIntro = fingerprinting.CompareEcosystem(version, introduced, ecosystem)
-		if cmpIntro == 2 {
-			return false
-		} // incomparable: never guess
-		if cmpIntro < 0 {
-			return false
+		if !evaluate(introduced, func(c int) bool { return c >= 0 }) {
+			return false, deciding, &constraint
 		}
 	}
 	if fixed != "" {
-		cmpFixed = fingerprinting.CompareEcosystem(version, fixed, ecosystem)
-		if cmpFixed == 2 {
-			return false
-		}
-		if cmpFixed >= 0 {
-			return false
+		if !evaluate(fixed, func(c int) bool { return c < 0 }) {
+			return false, deciding, &constraint
 		}
 	}
 	if lastAffected != "" {
-		cmpLA := fingerprinting.CompareEcosystem(version, lastAffected, ecosystem)
-		if cmpLA == 2 {
-			return false
-		}
-		if cmpLA > 0 {
-			return false
+		if !evaluate(lastAffected, func(c int) bool { return c <= 0 }) {
+			return false, deciding, &constraint
 		}
 	}
-	return introduced != "" || fixed != "" || lastAffected != ""
+	return true, deciding, &constraint
 }
 
 func (m *Matcher) matchService(ctx context.Context, in MatchInput, max int) ([]Match, error) {
-	// Build CPE candidate set: explicit CPEs first, then synthesized ones.
-	cpes := append([]string{}, in.CPEs...)
-	cpes = append(cpes, fingerprinting.ServiceToCPE(in.Vendor, in.Product, in.Version)...)
+	// Build CPE candidate set. When a version is under judgment, the
+	// synthesized CPE carrying it (the caller's normalized input version)
+	// is evaluated FIRST — it is the authoritative observed version; an
+	// explicit scanner CPE may carry only the upstream part ("10.0p2") or
+	// a differently formatted string. Explicit CPEs follow, and the
+	// versionless synthesized fallback is last: it can only produce
+	// "potential" verdicts and must never preempt versioned ones. Without
+	// a version under judgment the original order holds (explicit CPEs,
+	// whose own version may pin or range, then the versionless fallback).
+	synth := fingerprinting.ServiceToCPE(in.Vendor, in.Product, in.Version)
+	var cpes []string
+	if in.Version != "" && len(synth) > 0 {
+		cpes = append(cpes, synth[0])
+		cpes = append(cpes, in.CPEs...)
+		cpes = append(cpes, synth[1:]...)
+	} else {
+		cpes = append(cpes, in.CPEs...)
+		cpes = append(cpes, synth...)
+	}
 
 	seen := map[string]bool{}
 	// rangeMiss records CVEs whose version bounds already rejected the
@@ -207,7 +264,14 @@ func (m *Matcher) matchService(ctx context.Context, in MatchInput, max int) ([]M
 			if seen[id] {
 				continue
 			}
-			if rangeMiss[id] && in.Version != "" {
+			// A versionless candidate must not resurrect a CVE that a
+			// versioned candidate already range-rejected. A versioned
+			// candidate with a DIFFERENT version string (the synthesized
+			// CPE carries the normalized input version; an explicit CPE
+			// may carry nmap's upstream-only one) is judged on its own
+			// version — a miss by one candidate version is not a miss by
+			// every candidate version.
+			if rangeMiss[id] && c.Version == "" {
 				seen[id] = true
 				continue
 			}
@@ -277,10 +341,18 @@ func evaluateCPE(vuln *domain.Vulnerability, observed fingerprinting.CPE, in Mat
 			if observed.Version == "" {
 				return domain.MatchHeuristic, 0.35, "Product in affected range expression but version unknown (potential)", ev
 			}
-			if versionInRange(cm, observed.Version) {
+			if in, verdict := versionInRange(cm, observed.Version); in {
 				reason := "Version " + observed.Version + " inside affected range " + rangeString(cm)
 				if cm.VersionType != "" {
 					reason += " (" + cm.VersionType + " ordering)"
+				}
+				ev["constraint"] = cm.Constraint()
+				if verdict != nil {
+					ev["bound_domain"] = string(verdict.Domain)
+					if verdict.Projected != "" {
+						ev["projected_version"] = verdict.Projected
+						reason += " — installed compared as upstream " + verdict.Projected
+					}
 				}
 				return domain.MatchCPERange, 0.9, reason, ev
 			}
@@ -333,29 +405,56 @@ func rangeString(cm domain.CPEMatch) string {
 	return strings.Join(parts, ", ")
 }
 
-// versionInRange evaluates NVD/CVE-v5 range boundaries under the match's
-// versionType ordering. Both sides are cleaned first, so banner noise
-// ("10.0p2 Debian 7") compares correctly against feed bounds ("10.4").
-func versionInRange(cm domain.CPEMatch, v string) bool {
-	ok := true
-	vt := cm.VersionType
+// versionInRange evaluates NVD/CVE-v5 range boundaries, routing every
+// bound through CompareCPEBound under the match's declared versionType.
+// Distro versionTypes order distro-format bounds fully and project
+// upstream-only bounds to the installed version's upstream component;
+// custom/unknown versionTypes — what NVD declares for OpenSSH — decide in
+// the structured OpenSSH domain when both sides are OpenSSH releases and
+// fall back to the generic natural-order comparator otherwise. Both sides
+// are cleaned first, so banner noise ("10.0p2 Debian 7") and
+// distro-normalized forms ("10.0p2-5ubuntu5.4") compare correctly against
+// feed bounds ("10.5"). Incomparable bounds never match (never guess).
+// Returns whether the version is inside the range plus the verdict of the
+// bound that decided (nil when the range has no bounds).
+func versionInRange(cm domain.CPEMatch, v string) (bool, *fingerprinting.BoundVerdict) {
+	var last *fingerprinting.BoundVerdict // the final bound that confirmed "inside"
+	decide := func(bound string, inside func(c int) bool) (bool, *fingerprinting.BoundVerdict) {
+		verdict := fingerprinting.CompareCPEBound(v, bound, cm.VersionType)
+		if verdict.Compare == 2 {
+			return false, &verdict // incomparable: never guess
+		}
+		return inside(verdict.Compare), &verdict
+	}
 	if cm.VersionStartIncl != "" {
-		c := fingerprinting.CompareTyped(v, cm.VersionStartIncl, vt)
-		ok = ok && c != 2 && c >= 0
+		in, vd := decide(cm.VersionStartIncl, func(c int) bool { return c >= 0 })
+		last = vd
+		if !in {
+			return false, vd
+		}
 	}
 	if cm.VersionStartExcl != "" {
-		c := fingerprinting.CompareTyped(v, cm.VersionStartExcl, vt)
-		ok = ok && c != 2 && c > 0
+		in, vd := decide(cm.VersionStartExcl, func(c int) bool { return c > 0 })
+		last = vd
+		if !in {
+			return false, vd
+		}
 	}
 	if cm.VersionEndIncl != "" {
-		c := fingerprinting.CompareTyped(v, cm.VersionEndIncl, vt)
-		ok = ok && c != 2 && c <= 0
+		in, vd := decide(cm.VersionEndIncl, func(c int) bool { return c <= 0 })
+		last = vd
+		if !in {
+			return false, vd
+		}
 	}
 	if cm.VersionEndExcl != "" {
-		c := fingerprinting.CompareTyped(v, cm.VersionEndExcl, vt)
-		ok = ok && c != 2 && c < 0
+		in, vd := decide(cm.VersionEndExcl, func(c int) bool { return c < 0 })
+		last = vd
+		if !in {
+			return false, vd
+		}
 	}
-	return ok
+	return true, last
 }
 
 // BestSeverity picks the most authoritative CVSS for display: v3.1 > v3.0 > v4 > v2.

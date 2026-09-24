@@ -58,7 +58,7 @@ flowchart LR
   UI[web UI] --> API
 ```
 
-Deeper documents: [ARCHITECTURE](docs/ARCHITECTURE.md) · [SCANNER](docs/SCANNER.md) · [AGENT](docs/AGENT.md) · [VULNERABILITY-FEEDS](docs/VULNERABILITY-FEEDS.md) · [DETECTION-ENGINE](docs/DETECTION-ENGINE.md) · [DATA-MODEL](docs/DATA-MODEL.md) · [API](docs/API.md) · [SECURITY-MODEL](docs/SECURITY-MODEL.md) · [THREAT-MODEL](docs/THREAT-MODEL.md) · [DEPLOYMENT](docs/DEPLOYMENT.md) · [OPERATIONS](docs/OPERATIONS.md) · [TROUBLESHOOTING](docs/TROUBLESHOOTING.md) · [SPEC-COMPLIANCE](docs/SPEC-COMPLIANCE.md)
+Deeper documents: [ARCHITECTURE](docs/ARCHITECTURE.md) · [SCANNER](docs/SCANNER.md) · [AGENT](docs/AGENT.md) · [VULNERABILITY-FEEDS](docs/VULNERABILITY-FEEDS.md) · [DETECTION-ENGINE](docs/DETECTION-ENGINE.md) · [DATA-MODEL](docs/DATA-MODEL.md) · [API](docs/API.md) · [SECURITY-MODEL](docs/SECURITY-MODEL.md) · [THREAT-MODEL](docs/THREAT-MODEL.md) · [DEPLOYMENT](docs/DEPLOYMENT.md) · [OPERATIONS](docs/OPERATIONS.md) · [TROUBLESHOOTING](docs/TROUBLESHOOTING.md)
 
 ## Repository layout
 
@@ -87,6 +87,17 @@ testdata/       synthetic feed/sensor fixtures used by tests
 | `make run-server` / `run-worker` / `run-scanner` | run services locally |
 | `cd web && npm run dev` | frontend dev server (proxies to :8080) |
 | `cd web && npm run build` | production frontend bundle |
+
+## Releases
+
+Versions are cut by [semantic-release](.releaserc.json) from **Conventional Commits** on `main` — the git tag is the single source of truth, there is no version file in the tree:
+
+- `fix:` / `perf:` → patch (v1.6.1)
+- `feat:` → minor (v1.7.0)
+- `feat!:` / `fix!:` with a `BREAKING CHANGE:` footer → major (v2.0.0)
+- `docs:` / `chore:` / `refactor:` / `test:` → no release
+
+Each release updates CHANGELOG.md, tags `vX.Y.Z` and attaches packaged source archives to the GitHub release. Pull-request commit messages are linted in CI.
 
 ## Security posture
 

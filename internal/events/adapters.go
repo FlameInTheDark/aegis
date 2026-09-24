@@ -1,6 +1,6 @@
 // Package events contains sensor adapters that normalize external IDS /
 // network-monitor output into the platform's common event model
-// (spec §21/§22). The engines are never reimplemented — their output is
+// . The engines are never reimplemented — their output is
 // parsed, bounded and preserved.
 package events
 
@@ -15,7 +15,7 @@ import (
 	"github.com/FlameInTheDark/aegis/internal/ids"
 )
 
-// maxRawBytes bounds any single raw record kept for evidence (§22/§104).
+// maxRawBytes bounds any single raw record kept for evidence.
 const maxRawBytes = 1 << 20
 
 // Envelope builds a normalized event with schema version and id.
@@ -54,7 +54,7 @@ func severityFromSuricata(n float64) domain.Severity {
 	}
 }
 
-// SuricataAdapter parses Suricata EVE JSON (spec §42).
+// SuricataAdapter parses Suricata EVE JSON.
 type SuricataAdapter struct{}
 
 func (SuricataAdapter) Source() string { return string(domain.SourceSuricata) }
@@ -180,7 +180,7 @@ func numOf(v any) float64 {
 	return 0
 }
 
-// ZeekAdapter parses Zeek JSON logs (spec §43).
+// ZeekAdapter parses Zeek JSON logs.
 type ZeekAdapter struct{}
 
 func (ZeekAdapter) Source() string { return string(domain.SourceZeek) }
@@ -294,7 +294,7 @@ func boundMeta(src, dst map[string]any, max int) {
 	}
 }
 
-// SnortAdapter parses Snort 3 JSON alert output (spec §44).
+// SnortAdapter parses Snort 3 JSON alert output.
 type SnortAdapter struct{}
 
 func (SnortAdapter) Source() string { return string(domain.SourceSnort) }

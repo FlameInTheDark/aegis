@@ -1,4 +1,4 @@
-# Kubernetes deployment (spec §88)
+# Kubernetes deployment
 
 Plain manifests live beside this README (`kubectl apply -f deploy/kubernetes/`).
 They cover the application workloads; the data layer (PostgreSQL, Redis, NATS,

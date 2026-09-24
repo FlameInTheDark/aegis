@@ -10,7 +10,7 @@ import (
 	"github.com/gofiber/fiber/v2"
 )
 
-// User management (spec §7/§8): administrators create and manage users;
+// User management: administrators create and manage users;
 // every signed-in user can change their own password. Managers (analysts,
 // operators, viewers) have NO user:manage permission, so they can only use
 // the self-service endpoints below.

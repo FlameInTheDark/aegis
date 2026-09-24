@@ -28,7 +28,7 @@ type authClaimsAlias = authClaimsDef
 func idsNew() string { return ids.New() }
 
 // ---------------------------------------------------------------------------
-// Vulnerabilities (§58)
+// Vulnerabilities
 
 // handleListVulns lists the CVE index with enrichment.
 func (a *App) handleListVulns(c *fiber.Ctx) error {
@@ -117,7 +117,7 @@ func (a *App) handleGetVuln(c *fiber.Ctx) error {
 }
 
 // ---------------------------------------------------------------------------
-// Findings (§38/§39/§59/§93)
+// Findings
 
 func (a *App) handleListFindings(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
@@ -160,7 +160,7 @@ func (a *App) handleGetFinding(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"finding": f, "evidence": evidence, "history": history})
 }
 
-// handleUpdateFinding changes status with audit trail (§38).
+// handleUpdateFinding changes status with audit trail.
 func (a *App) handleUpdateFinding(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
 	if he := a.requirePerm(c, domain.PermFindingWrite); he != nil {
@@ -210,7 +210,7 @@ func (a *App) handleBulkFindings(c *fiber.Ctx) error {
 		return BadRequest("bulk limit is 500 findings per request")
 	}
 	status := domain.FindingStatus(req.Status)
-	// Dangerous bulk ops need explicit confirmation (§59).
+	// Dangerous bulk ops need explicit confirmation.
 	if status == domain.FindingFalsePositive || status == domain.FindingAcceptedRisk || status == domain.FindingSuppressed {
 		if !req.Confirm {
 			return Conflict("confirmation required for dangerous bulk operation")
@@ -228,7 +228,7 @@ func (a *App) handleBulkFindings(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"updated": n})
 }
 
-// handleSuppressFinding records a scoped suppression (§93).
+// handleSuppressFinding records a scoped suppression.
 func (a *App) handleSuppressFinding(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
 	if he := a.requirePerm(c, domain.PermFindingWrite); he != nil {
@@ -266,7 +266,7 @@ func strPtr(s string) *string {
 }
 
 // ---------------------------------------------------------------------------
-// Feeds (§179/§180 freshness)
+// Feeds (freshness)
 
 func (a *App) handleListFeeds(c *fiber.Ctx) error {
 	items, err := a.svc.Feeds.Sources(Context(c))
@@ -282,7 +282,7 @@ func (a *App) handleTriggerFeedSync(c *fiber.Ctx) error {
 		return he
 	}
 	name := c.Params("name")
-	// Feed sync is asynchronous by design (§30) — publish a trigger the
+	// Feed sync is asynchronous by design — publish a trigger the
 	// feed-worker consumes on security.feed.sync.v1 so the request takes
 	// effect immediately instead of silently doing nothing until the next
 	// scheduled tick.
@@ -300,7 +300,7 @@ func (a *App) handleTriggerFeedSync(c *fiber.Ctx) error {
 // handleRunCorrelation re-runs the service↔CVE matching sweep for the whole
 // organization on demand — typically right after a feed sync pulled new CVE
 // data, or when the user wants fresh findings without re-scanning. Runs in
-// the background; results appear as findings (§72 pipeline, §73 evidence).
+// the background; results appear as findings (pipeline, evidence).
 func (a *App) handleRunCorrelation(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
 	if he := a.requirePerm(c, domain.PermFindingWrite); he != nil {

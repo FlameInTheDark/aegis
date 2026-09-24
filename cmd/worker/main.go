@@ -1,5 +1,5 @@
 // Command worker runs background jobs: telemetry ingestion, report
-// generation, scan scheduling, housekeeping (spec §5.2, §121-§122).
+// generation, scan scheduling, housekeeping (.2).
 package main
 
 import (
@@ -8,12 +8,14 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/FlameInTheDark/aegis/internal/config"
 	"github.com/FlameInTheDark/aegis/internal/detections"
 	"github.com/FlameInTheDark/aegis/internal/domain"
+	"github.com/FlameInTheDark/aegis/internal/joblog"
 	"github.com/FlameInTheDark/aegis/internal/logging"
 	"github.com/FlameInTheDark/aegis/internal/observability"
 	"github.com/FlameInTheDark/aegis/internal/platform"
@@ -25,6 +27,16 @@ import (
 	"github.com/FlameInTheDark/aegis/internal/telemetry"
 	"github.com/FlameInTheDark/aegis/migrations"
 )
+
+// joblogRetentionDays reads AEGIS_JOBLOG_RETENTION_DAYS (default 7).
+func joblogRetentionDays() int {
+	if v := os.Getenv("AEGIS_JOBLOG_RETENTION_DAYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 7
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -53,6 +65,7 @@ func run() error {
 		log.Warn("migrator init failed", "err", merr)
 	}
 	db, err := pg.Connect(ctx, cfg.DatabaseURL)
+	retention := time.Duration(joblogRetentionDays()) * 24 * time.Hour
 	if err != nil {
 		return fmt.Errorf("postgres: %w", err)
 	}
@@ -132,7 +145,7 @@ func run() error {
 		log.Warn("scan profile sync failed", "err", err)
 	}
 
-	// --- periodic maintenance loop (§121)
+	// --- periodic maintenance loop
 	go func() {
 		t := time.NewTicker(30 * time.Second)
 		defer t.Stop()
@@ -147,6 +160,11 @@ func run() error {
 				_ = agentTasks.ExpireStale(ctx)
 				_ = agentsRepo.MarkOffline(ctx, time.Now().UTC().Add(-3*time.Minute))
 				_ = scannersRepo.MarkOffline(ctx, time.Now().UTC().Add(-3*time.Minute))
+				// Job log retention (AEGIS_JOBLOG_RETENTION_DAYS, default 7):
+				// structured log lines are streaming data, not an archive.
+				if n, err := joblog.NewStore(db).DeleteBefore(ctx, time.Now().UTC().Add(-retention)); err == nil && n > 0 {
+					log.Info("job log retention sweep", "removed", n)
+				}
 				jobs, err := pg.NewReportRepo(db).QueuedJobs(ctx, 5)
 				if err == nil {
 					for _, job := range jobs {

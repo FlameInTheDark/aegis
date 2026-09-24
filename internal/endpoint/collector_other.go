@@ -14,8 +14,8 @@ import (
 	"os"
 )
 
-// Non-Linux fallbacks (spec §18): windows/macOS collectors are best-effort
-// and rely on native APIs added incrementally; documented assumption §191.
+// Non-Linux fallbacks: windows/macOS collectors are best-effort
+// and rely on native APIs added incrementally; documented assumption.
 
 func jsonMarshal(v any) ([]byte, error) { return json.Marshal(v) }
 
@@ -58,7 +58,7 @@ func writeJSON(path string, v any) error {
 }
 
 // ---------------------------------------------------------------------------
-// Non-Linux collector fallbacks (spec §18, documented assumption §191):
+// Non-Linux collector fallbacks (best-effort):
 // windows uses registry/WMI APIs in a future revision; macOS uses
 // system_profiler/pkgutil. The basics below keep the agent functional.
 

@@ -14,37 +14,70 @@ const base = {
   },
 }
 
-export function Chart({ option, height = 260, loading, onSelect }: {
+type ChartSelectParams = { componentType?: string; dataType?: string; data?: unknown }
+
+export function Chart({ option, height = 260, loading, onSelect, onDataZoom }: {
   option: echarts.EChartsOption
   height?: number
   loading?: boolean
   // onSelect receives clicked elements' params (graph nodes, pie slices…).
   // Undefined marks are harmless — pages filter on what they know.
-  onSelect?: (params: { componentType?: string; dataType?: string; data?: unknown }) => void
+  onSelect?: (params: ChartSelectParams) => void
+  // onDataZoom receives the visible [startValue, endValue] window after a
+  // zoom interaction (slider drag, brush, resize of the selection). Range
+  // timelines use it to drive the date inputs; undefined opts out.
+  onDataZoom?: (start: number, end: number) => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
+  const chartRef = useRef<echarts.ECharts | null>(null)
+  const optionRef = useRef(option)
+  optionRef.current = option
   const onSelectRef = useRef(onSelect)
   onSelectRef.current = onSelect
+  const onDataZoomRef = useRef(onDataZoom)
+  onDataZoomRef.current = onDataZoom
+
+  // The chart instance lives as long as the host div does: it is created
+  // once when the div enters the DOM and disposed when it leaves (loading
+  // toggle or unmount). Re-creating the instance on every data change used
+  // to replay the entry animation — lines sweeping left to right on each
+  // refresh — instead of morphing the series in place.
   useEffect(() => {
-    if (!ref.current) return
+    if (loading || !ref.current) return
     const chart = echarts.init(ref.current, undefined, { renderer: 'canvas' })
-    chart.setOption({ ...base, ...option })
+    chartRef.current = chart
+    chart.setOption({ ...base, ...optionRef.current })
     const onResize = () => chart.resize()
     window.addEventListener('resize', onResize)
-    if (onSelectRef.current) {
-      const handler = (params: echarts.ECElementEvent) => onSelectRef.current?.(params as { componentType?: string; dataType?: string; data?: unknown })
-      chart.on('click', handler)
-      return () => {
-        window.removeEventListener('resize', onResize)
-        chart.off('click', handler)
-        chart.dispose()
-      }
+    const onClick = (params: echarts.ECElementEvent) => onSelectRef.current?.(params as ChartSelectParams)
+    chart.on('click', onClick)
+    const onZoom = () => {
+      const cb = onDataZoomRef.current
+      if (!cb) return
+      const raw = (chart.getOption() as echarts.EChartsOption).dataZoom
+      const dz = (Array.isArray(raw) ? raw[0] : raw) as
+        | { startValue?: number; endValue?: number }
+        | undefined
+      if (!dz) return
+      if (typeof dz.startValue !== 'number' || typeof dz.endValue !== 'number') return
+      cb(dz.startValue, dz.endValue)
     }
+    chart.on('datazoom', onZoom)
     return () => {
       window.removeEventListener('resize', onResize)
+      chart.off('click', onClick)
+      chart.off('datazoom', onZoom)
       chart.dispose()
+      chartRef.current = null
     }
+  }, [loading])
+
+  // Data updates merge into the live instance — ECharts transitions the
+  // series between the old and new data instead of redrawing from scratch.
+  useEffect(() => {
+    chartRef.current?.setOption({ ...base, ...option })
   }, [option])
+
   return (
     <div>
       {loading ? <Spinner label="Loading chart…" /> : <div ref={ref} style={{ height }} role="img" aria-label="Chart" />}
@@ -77,7 +110,9 @@ export function SeverityDonut({ bySeverity }: { bySeverity: Record<string, numbe
   )
 }
 
-// Time series area chart (risk/vulns/events trends).
+// Time series area chart (risk/vulns/events trends). boundaryGap: false
+// pins the first and last point to the plot edges — the newest sample sits
+// at the right edge instead of floating half a slot inward.
 export function TimeSeriesChart({ points, color = '#5E6AD2', label }: {
   points: { ts: string; value: number }[]
   color?: string
@@ -86,7 +121,7 @@ export function TimeSeriesChart({ points, color = '#5E6AD2', label }: {
   return (
     <Chart
       option={{
-        xAxis: { type: 'category', data: points.map((p) => p.ts.slice(5, 16)), axisLine: { lineStyle: { color: 'rgba(255,255,255,0.1)' } } },
+        xAxis: { type: 'category', boundaryGap: false, data: points.map((p) => p.ts.slice(5, 16)), axisLine: { lineStyle: { color: 'rgba(255,255,255,0.1)' } } },
         yAxis: { type: 'value', splitLine: { lineStyle: { color: 'rgba(255,255,255,0.05)' } } },
         series: [{
           type: 'line', data: points.map((p) => p.value),

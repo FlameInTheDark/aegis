@@ -62,3 +62,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: echo "regenerate with swag init and diff; fails CI when stale"
+
+  commitlint:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: lint commit messages (conventional commits)
+        run: |
+          npm install --no-save @commitlint/cli@19 @commitlint/config-conventional@19
+          npx commitlint --from "origin/${{ github.base_ref }}" --to "$GITHUB_SHA"

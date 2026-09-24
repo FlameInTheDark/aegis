@@ -4,6 +4,7 @@ import (
 	gocontext "context"
 	"crypto/sha256"
 	"encoding/hex"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -21,7 +22,7 @@ func sha256Sum(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// pageParams parses page/limit with caps (§119).
+// pageParams parses page/limit with caps.
 func pageParams(c *fiber.Ctx) (page, limit int) {
 	page, _ = strconv.Atoi(c.Query("page"))
 	if page < 1 {
@@ -106,7 +107,21 @@ func (a *App) handleListSites(c *fiber.Ctx) error {
 	if err != nil {
 		return Internal("list sites failed")
 	}
-	return c.JSON(fiber.Map{"items": sites})
+	// asset_count drives the scope dropdown + sites table; one aggregate for
+	// the whole org, missing sites stay at zero.
+	counts, err := a.svc.Assets.CountBySite(Context(c), claims.OrganizationID)
+	if err != nil {
+		counts = map[string]int64{}
+	}
+	type siteView struct {
+		domain.Site
+		AssetCount int64 `json:"asset_count"`
+	}
+	items := make([]siteView, 0, len(sites))
+	for _, s := range sites {
+		items = append(items, siteView{Site: s, AssetCount: counts[s.ID]})
+	}
+	return c.JSON(fiber.Map{"items": items})
 }
 
 func (a *App) handleCreateSite(c *fiber.Ctx) error {
@@ -150,7 +165,7 @@ func (a *App) handleUpdateSite(c *fiber.Ctx) error {
 	if err := c.BodyParser(&fields); err != nil {
 		return BadRequest("invalid JSON body")
 	}
-	// Whitelist updatable fields (§82 input validation).
+	// Whitelist updatable fields (input validation).
 	allowed := map[string]bool{"name": true, "description": true, "site_type": true}
 	for k := range fields {
 		if !allowed[k] {
@@ -182,15 +197,16 @@ func (a *App) handleCreateNetwork(c *fiber.Ctx) error {
 		return he
 	}
 	var req struct {
-		CIDR    string `json:"cidr"`
-		Name    string `json:"name"`
-		Gateway string `json:"gateway"`
-		VLANID  *int   `json:"vlan_id"`
+		CIDR     string `json:"cidr"`
+		Name     string `json:"name"`
+		Gateway  string `json:"gateway"`
+		Exposure string `json:"exposure"`
+		VLANID   *int   `json:"vlan_id"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return BadRequest("invalid JSON body")
 	}
-	net, err := a.svc.OrgService.CreateNetwork(Context(c), claims.OrganizationID, c.Params("id"), req.CIDR, req.Name, req.Gateway, req.VLANID)
+	net, err := a.svc.OrgService.CreateNetwork(Context(c), claims.OrganizationID, c.Params("id"), req.CIDR, req.Name, req.Gateway, req.Exposure, req.VLANID)
 	if err != nil {
 		return BadRequest(err.Error())
 	}
@@ -206,7 +222,7 @@ func (a *App) handleListNetworks(c *fiber.Ctx) error {
 }
 
 // ---------------------------------------------------------------------------
-// Search (§67)
+// Search
 
 func (a *App) handleSearch(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
@@ -225,7 +241,7 @@ func (a *App) handleSearch(c *fiber.Ctx) error {
 }
 
 // ---------------------------------------------------------------------------
-// Notes (§168)
+// Notes
 
 func (a *App) handleAddNote(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
@@ -248,7 +264,7 @@ func (a *App) handleAddNote(c *fiber.Ctx) error {
 }
 
 // ---------------------------------------------------------------------------
-// Metrics (§47 dashboard data)
+// Metrics (dashboard data)
 
 func (a *App) handleMetricsSummary(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
@@ -300,7 +316,7 @@ func (a *App) handleMetricsSummary(c *fiber.Ctx) error {
 }
 
 func (a *App) kevFindingsCount(ctx gocontext.Context, orgID string) int {
-	// Findings whose CVE is in the KEV set (5-minute cache, §80).
+	// Findings whose CVE is in the KEV set (5-minute cache).
 	cacheKey := "metrics:kev:" + orgID
 	if a.svc.Redis != nil {
 		var n int
@@ -345,11 +361,30 @@ func (a *App) handleMetricsTimeseries(c *fiber.Ctx) error {
 			// No ClickHouse: fall through with no points instead of panicking.
 			break
 		}
-		vol, err := a.svc.CH.EventVolume(Context(c), claims.OrganizationID, from, "hour")
-		if err == nil {
-			for _, p := range vol {
-				points = append(points, fiber.Map{"ts": p.Bucket, "value": p.Count})
+		// Daily buckets with a per-category breakdown for the overview's
+		// stacked event-volume chart. The ts/value pair stays for clients
+		// that only read totals (old dashboard).
+		cats, err := a.svc.CH.EventVolumeByCategory(Context(c), claims.OrganizationID, from, "day")
+		if err != nil {
+			break
+		}
+		order := []string{}
+		byDay := map[string]map[string]int64{}
+		for _, p := range cats {
+			key := p.Bucket.Format("2006-01-02")
+			if _, ok := byDay[key]; !ok {
+				byDay[key] = map[string]int64{}
+				order = append(order, key)
 			}
+			byDay[key][p.Category] += int64(p.Count)
+		}
+		sort.Strings(order)
+		for _, key := range order {
+			total := int64(0)
+			for _, n := range byDay[key] {
+				total += n
+			}
+			points = append(points, fiber.Map{"ts": key, "value": total, "by_category": byDay[key]})
 		}
 	case "risk", "vulns":
 		// Postgres-backed approximations from finding history.

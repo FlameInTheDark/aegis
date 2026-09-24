@@ -1,8 +1,8 @@
 // Package scanner implements external scanning engines behind explicit Go
-// adapters (spec §12): nmap, zgrab2 and a built-in simulated engine used
+// adapters: nmap, zgrab2 and a built-in simulated engine used
 // for demos/tests. All external execution uses exec.CommandContext with
 // argument arrays — never a shell — and enforces timeouts, output caps and
-// target validation (§12, §71, §82).
+// target validation.
 package scanner
 
 import (
@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os/exec"
 	"sort"
 	"strings"
@@ -19,7 +20,7 @@ import (
 	"github.com/FlameInTheDark/aegis/internal/domain"
 )
 
-// Limits bounds every engine run (spec §71).
+// Limits bounds every engine run.
 type Limits struct {
 	MaxRuntime    time.Duration
 	MaxStdout     int64 // bytes
@@ -53,7 +54,9 @@ type Engine interface {
 	// Traceroute returns the network path from the scanner to the target.
 	// The last hop is the target itself. Best effort: engines may return an
 	// empty path when tracing is impossible (filtered ICMP, no privileges).
-	Traceroute(ctx context.Context, target string, cfg *domain.ScanConfig, limits Limits) ([]Hop, error)
+	// The Trace carries the probe family and the raw engine output alongside
+	// the parsed hops (see Trace).
+	Traceroute(ctx context.Context, target string, cfg *domain.ScanConfig, limits Limits) (Trace, error)
 	// Version reports the engine binary version for audit logs.
 	Version(ctx context.Context) (string, error)
 }
@@ -63,6 +66,7 @@ type HostResult struct {
 	IP         string    `json:"ip"`
 	Hostname   string    `json:"hostname,omitempty"`
 	MAC        string    `json:"mac,omitempty"`
+	MACVendor  string    `json:"mac_vendor,omitempty"`
 	OS         *OSResult `json:"os,omitempty"`
 	Device     string    `json:"device_type,omitempty"`
 	Confidence float64   `json:"confidence"`
@@ -106,6 +110,10 @@ type OSResult struct {
 	Version    string  `json:"version"`
 	Device     string  `json:"device_type,omitempty"`
 	Confidence float64 `json:"confidence"`
+	// Link-layer details nmap reports in the address records of an -O run;
+	// empty when the probes never touched L2 (unprivileged or remote hop).
+	MAC       string `json:"mac,omitempty"`
+	MACVendor string `json:"mac_vendor,omitempty"`
 }
 
 // Hop is one router on the traced path from the scanner to a target.
@@ -116,8 +124,73 @@ type Hop struct {
 	RTTms    float64 `json:"rtt_ms,omitempty"`
 }
 
+// Trace is the full result of one traceroute: the parsed hops, the probe
+// family that produced them (nmap ladder kinds, tracert, tracepath,
+// simulated) and the RAW engine output (nmap XML / tracert text). The raw
+// output is persisted with the parsed path so operators can audit what the
+// scanner actually observed instead of trusting the parse blindly.
+type Trace struct {
+	Hops   []Hop
+	Method string // tcp-syn | udp | icmp | tcp-connect | tracert | tracepath | simulated
+	Raw    string
+}
+
 // ---------------------------------------------------------------------------
 // Process execution plumbing (shared by all external engines)
+
+// RunHooks lets the scan pipeline tee raw engine output into the job log
+// while the normal bounded capture still collects it for parsing.
+type RunHooks struct {
+	// OnCommand fires once per engine invocation with the full argv.
+	OnCommand func(argv []string)
+	// OnStderrLine fires for every complete stderr line the engine prints.
+	OnStderrLine func(line string)
+}
+
+// lineSplitter wraps the bounded stderr capture and forwards complete
+// lines to the hook. Partial trailing output is flushed on Close.
+type lineSplitter struct {
+	next io.Writer
+	hook func(line string)
+	buf  []byte
+}
+
+func (l *lineSplitter) Write(p []byte) (int, error) {
+	if l.next != nil {
+		if _, err := l.next.Write(p); err != nil {
+			return 0, err
+		}
+	}
+	if l.hook == nil {
+		return len(p), nil
+	}
+	l.buf = append(l.buf, p...)
+	for {
+		i := bytes.IndexByte(l.buf, '\n')
+		if i < 0 {
+			// Bound the pending buffer: a pathological engine printing one
+			// endless line must not grow memory without limit.
+			if len(l.buf) > 64<<10 {
+				l.hook(string(l.buf[:64<<10]) + " …[truncated]")
+				l.buf = l.buf[:0]
+			}
+			break
+		}
+		line := l.buf[:i]
+		l.buf = l.buf[i+1:]
+		if len(line) > 0 {
+			l.hook(string(line))
+		}
+	}
+	return len(p), nil
+}
+
+func (l *lineSplitter) Close() {
+	if l.hook != nil && len(l.buf) > 0 {
+		l.hook(string(l.buf))
+	}
+	l.buf = nil
+}
 
 // cappedWriter is an io.Writer that silently drops output beyond a cap.
 type cappedWriter struct {
@@ -148,10 +221,18 @@ func withExtra(cfg *domain.ScanConfig, argv []string) []string {
 }
 
 // run executes a command safely: no shell, arg arrays, hard timeout,
-// bounded stdout/stderr, stderr separated (spec §12).
-func run(ctx context.Context, limits Limits, argv []string) (stdout, stderr []byte, code int, err error) {
+// bounded stdout/stderr, stderr separated. Optional hooks tee the argv and
+// stderr lines to the caller (job log streaming) without changing capture.
+func run(ctx context.Context, limits Limits, argv []string, hooks ...RunHooks) (stdout, stderr []byte, code int, err error) {
 	if len(argv) == 0 {
 		return nil, nil, -1, fmt.Errorf("empty argv")
+	}
+	var h RunHooks
+	if len(hooks) > 0 {
+		h = hooks[0]
+	}
+	if h.OnCommand != nil {
+		h.OnCommand(argv)
 	}
 	ctx, cancel := context.WithTimeout(ctx, limits.MaxRuntime)
 	defer cancel()
@@ -160,6 +241,11 @@ func run(ctx context.Context, limits Limits, argv []string) (stdout, stderr []by
 	outW.max, errW.max = limits.MaxStdout, limits.MaxStderr
 	cmd.Stdout = &outW
 	cmd.Stderr = &errW
+	if h.OnStderrLine != nil {
+		ls := &lineSplitter{next: &errW, hook: h.OnStderrLine}
+		defer ls.Close()
+		cmd.Stderr = ls
+	}
 	err = cmd.Run()
 	stdout = outW.buf.Bytes()
 	stderr = errW.buf.Bytes()
@@ -176,7 +262,7 @@ func run(ctx context.Context, limits Limits, argv []string) (stdout, stderr []by
 	return stdout, stderr, 0, nil
 }
 
-// validateTarget refuses anything that could escape typed config (§82).
+// validateTarget refuses anything that could escape typed config.
 func validateTarget(t string) error {
 	t = strings.TrimSpace(t)
 	if t == "" || len(t) > 256 {
@@ -274,9 +360,19 @@ func minInt(a, b int) int {
 // Nmap adapter
 
 // NmapEngine wraps the nmap binary. Default NSE category is "safe" only —
-// never "vuln" or "exploit" without an administrative, elevated profile (§145).
+// never "vuln" or "exploit" without an administrative, elevated profile.
 type NmapEngine struct {
 	BinPath string
+	// hooks tee raw engine diagnostics into the job log. Set once at
+	// startup (scanexec sets per-scan emitters through the indirection the
+	// hooks close over); the single-scan-per-executor invariant makes a
+	// mutex unnecessary.
+	hooks RunHooks
+}
+
+// SetOutputHooks installs the argv/stderr tee (scanexec.EngineHooker).
+func (n *NmapEngine) SetOutputHooks(onCommand func(argv []string), onStderr func(line string)) {
+	n.hooks = RunHooks{OnCommand: onCommand, OnStderrLine: onStderr}
 }
 
 func (n *NmapEngine) Name() string { return "nmap" }
@@ -310,7 +406,7 @@ func (n *NmapEngine) DiscoverHosts(ctx context.Context, targets []string, cfg *d
 	}
 	argv = append(argv, targets...)
 	argv = withExtra(cfg, argv)
-	stdout, stderr, code, err := run(ctx, limits, argv)
+	stdout, stderr, code, err := run(ctx, limits, argv, n.hooks)
 	if err != nil {
 		return nil, err
 	}
@@ -321,7 +417,7 @@ func (n *NmapEngine) DiscoverHosts(ctx context.Context, targets []string, cfg *d
 }
 
 // ScanPorts runs a TCP SYN scan plus -sV service detection when the
-// profile allows (§13). SYN scans need raw-packet privileges; when the
+// profile allows. SYN scans need raw-packet privileges; when the
 // process lacks them we transparently fall back to a TCP connect scan so
 // unprivileged demo/container deployments still get results.
 func (n *NmapEngine) ScanPorts(ctx context.Context, target string, ports []int, cfg *domain.ScanConfig, limits Limits) ([]PortResult, error) {
@@ -347,7 +443,7 @@ func (n *NmapEngine) ScanPorts(ctx context.Context, target string, ports []int, 
 	argv = append(argv, portSpecArgs(ports, cfg)...)
 	argv = append(argv, target)
 	argv = withExtra(cfg, argv)
-	stdout, stderr, code, err := run(ctx, limits, argv)
+	stdout, stderr, code, err := run(ctx, limits, argv, n.hooks)
 	if err != nil {
 		return nil, err
 	}
@@ -358,7 +454,7 @@ func (n *NmapEngine) ScanPorts(ctx context.Context, target string, ports []int, 
 			"--host-timeout", hostTimeout}, portSpecArgs(ports, cfg)...)
 		argvFb = append(argvFb, target)
 		argvFb = withExtra(cfg, argvFb)
-		stdout2, _, code2, err2 := run(ctx, limits, argvFb)
+		stdout2, _, code2, err2 := run(ctx, limits, argvFb, n.hooks)
 		if err2 == nil && code2 == 0 {
 			return parseNmapPorts(stdout2)
 		}
@@ -378,11 +474,11 @@ func (n *NmapEngine) FingerprintService(ctx context.Context, target string, port
 		"-p", fmt.Sprint(port), "-oX", "-",
 	}
 	if cfgSafeNSE(cfg) {
-		argv = append(argv, "--script", "safe") // never "vuln"/"exploit" here (§145)
+		argv = append(argv, "--script", "safe") // never "vuln"/"exploit" here
 	}
 	argv = withExtra(cfg, argv)
 	argv = append(argv, target)
-	stdout, stderr, code, err := run(ctx, limits, argv)
+	stdout, stderr, code, err := run(ctx, limits, argv, n.hooks)
 	if err != nil {
 		return nil, err
 	}
@@ -421,7 +517,7 @@ func (n *NmapEngine) FingerprintServicesLite(ctx context.Context, target string,
 		"--host-timeout", fmt.Sprintf("%ds", int(phaseTimeout(cfg, 120*time.Second).Seconds())),
 		"-p", spec, "-oX", "-", target}
 	argv = withExtra(cfg, argv)
-	stdout, stderr, code, err := run(ctx, limits, argv)
+	stdout, stderr, code, err := run(ctx, limits, argv, n.hooks)
 	if err != nil {
 		return nil, err
 	}
@@ -453,7 +549,7 @@ func (n *NmapEngine) FingerprintOS(ctx context.Context, target string, cfg *doma
 	}
 	argv := osScanArgs(n.BinPath, target, cfg, limits, phaseTimeout(cfg, 5*time.Minute))
 	argv = withExtra(cfg, argv)
-	stdout, stderr, code, err := run(ctx, limits, argv)
+	stdout, stderr, code, err := run(ctx, limits, argv, n.hooks)
 	if err != nil {
 		return nil, err
 	}
@@ -524,38 +620,46 @@ func osScanArgs(bin, target string, cfg *domain.ScanConfig, limits Limits, budge
 // swallow those (Docker Desktop/WSL2) show partial paths regardless of probe
 // type — the orchestrator links the deepest reachable hop to the asset. See
 // docs/DEVELOPMENT.md "Traceroute from containers".
-func (n *NmapEngine) Traceroute(ctx context.Context, target string, cfg *domain.ScanConfig, limits Limits) ([]Hop, error) {
+func (n *NmapEngine) Traceroute(ctx context.Context, target string, cfg *domain.ScanConfig, limits Limits) (Trace, error) {
 	if err := validateTarget(target); err != nil {
-		return nil, err
+		return Trace{}, err
 	}
 	limits.MaxRuntime = 3 * time.Minute
 	hostTimeout := fmt.Sprintf("%ds", int(phaseTimeout(cfg, 90*time.Second).Seconds()))
 	var lastErr error
 	for _, argv := range tracerouteLadder(n.BinPath, target, cfg, limits, hostTimeout) {
 		argv = withExtra(cfg, argv)
-		stdout, stderr, code, err := run(ctx, limits, argv)
+		stdout, stderr, code, err := run(ctx, limits, argv, n.hooks)
 		if err != nil {
-			return nil, err
+			return Trace{}, err
 		}
 		if code == 0 {
 			if hops, perr := parseNmapTraceroute(stdout, target); perr == nil && len(hops) > 0 {
-				return hops, nil
+				return Trace{Hops: hops, Method: probeKind(argv), Raw: string(stdout)}, nil
 			}
 		} else {
 			lastErr = fmt.Errorf("nmap traceroute (%s) exit %d: %s", probeKind(argv), code, truncateStr(string(stderr), 512))
 		}
 	}
-	// Last resort: the standalone tracepath binary (UDP-based, needs no
+	// Native platform fallbacks, before giving up on a real route:
+	// Windows tracert.exe ships everywhere and needs no elevation (ICMP
+	// echo via the standard API) — nmap's raw-packet traceroute needs
+	// Npcap AND an admin process, so unprivileged Windows scans used to
+	// lose the whole path. Skipped silently off-Windows.
+	if tr, ok := tracertTraceroute(ctx, target, limits); ok {
+		return tr, nil
+	}
+	// Then the standalone tracepath binary (UDP-based, needs no
 	// raw sockets, tolerates NATs better than ICMP). Skipped silently
 	// when the image does not ship it (AEGIS_SCANNER_TRACEPATH_PATH or
 	// PATH).
-	if hops, ok := tracepathTraceroute(ctx, target, limits); ok {
-		return hops, nil
+	if tr, ok := tracepathTraceroute(ctx, target, limits); ok {
+		return tr, nil
 	}
 	if lastErr != nil {
-		return nil, lastErr
+		return Trace{}, lastErr
 	}
-	return nil, nil
+	return Trace{}, nil
 }
 
 // tracerouteLadder builds the ordered nmap traceroute attempts (see
@@ -674,8 +778,8 @@ func truncateStr(s string, n int) string {
 // Simulated engine (demo mode / tests / air-gapped evaluation)
 
 // SimulatedEngine produces deterministic synthetic results so the whole
-// pipeline can run without touching a real network (spec §139: clearly
-// identified demo data; §105: no arbitrary real networks in tests).
+// pipeline can run without touching a real network (clearly
+// identified demo data; no arbitrary real networks in tests).
 type SimulatedEngine struct{}
 
 func (s *SimulatedEngine) Name() string                                { return "simulated" }
@@ -809,13 +913,13 @@ func (s *SimulatedEngine) FingerprintServicesLite(ctx context.Context, target st
 // Traceroute synthesizes a deterministic two-hop path: the gateway (first
 // usable address of the target's /24) and the target itself. This gives
 // demo/air-gapped deployments a sensible topology without touching a network.
-func (s *SimulatedEngine) Traceroute(ctx context.Context, target string, cfg *domain.ScanConfig, limits Limits) ([]Hop, error) {
+func (s *SimulatedEngine) Traceroute(ctx context.Context, target string, cfg *domain.ScanConfig, limits Limits) (Trace, error) {
 	var out []Hop
 	if gw := GatewayOf(target); gw != "" && gw != target {
 		out = append(out, Hop{TTL: 1, IP: gw, RTTms: 1.2})
 	}
 	out = append(out, Hop{TTL: len(out) + 1, IP: target, RTTms: 4.5})
-	return out, nil
+	return Trace{Hops: out, Method: "simulated"}, nil
 }
 
 // GatewayOf returns the first usable host address of the target's /24 for

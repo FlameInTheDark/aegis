@@ -1,5 +1,5 @@
 // Package observability exposes /healthz, /readyz, /metrics and optional
-// OpenTelemetry tracing for every service (spec §49, §81).
+// OpenTelemetry tracing for every service.
 package observability
 
 import (

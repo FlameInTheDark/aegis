@@ -1,0 +1,19 @@
+-- version_norm: the ingestion-normalized form of services.detected_version.
+--
+-- Banner-derived service versions (nmap -sV "version" attribute, product
+-- banners) carry distro packaging info inside the raw string —
+-- "10.0p2 Ubuntu 5ubuntu5.4" — which no version grammar can order
+-- directly. fingerprinting.NormalizeServiceVersion now runs at the
+-- orchestrator choke point on every "service" observation: the distro
+-- revision is recovered and the value canonicalized under the Debian
+-- grammar ("10.0p2-5ubuntu5.4") when it composes into one, the generic
+-- clean form otherwise.
+--
+-- services.detected_version keeps the raw banner-derived string
+-- verbatim (audit evidence); version_norm is what CVE matching
+-- compares against (same contract as software.version_norm from
+-- migration 0023). Existing rows keep version_norm='' until their next
+-- report refreshes them, and matching falls back to the raw value
+-- meanwhile; the asset API additionally computes version_meta on read,
+-- so the UI shows the normalized breakdown for old rows immediately.
+ALTER TABLE services ADD COLUMN version_norm TEXT NOT NULL DEFAULT '';

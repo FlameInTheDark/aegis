@@ -1,4 +1,4 @@
-// Package audit provides the audit logging service (spec §7/§85):
+// Package audit provides the audit logging service :
 // every security-relevant action records who/what/when/where/result with
 // structured before/after where applicable.
 package audit

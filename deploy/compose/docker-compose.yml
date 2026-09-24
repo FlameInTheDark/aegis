@@ -131,6 +131,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.server
+      args: { AEGIS_VERSION: "${AEGIS_VERSION:-dev}" }
     environment:
       <<: *common-env
       AEGIS_METRICS_ADDR: ":9091"
@@ -138,11 +139,17 @@ services:
       # container recreation — production mounts the real CA via secrets.
       AEGIS_AGENT_CA_CERT: /tmp/aegis-agent-ca.crt
       AEGIS_AGENT_CA_KEY: /tmp/aegis-agent-ca.key
+      # Endpoint embedded into the UI connect commands
+      # (aegis-connector --connect <addr>/<token>). Must be the address the
+      # COMPONENT can reach — the published host port below makes
+      # localhost:9090 work for connectors on the compose host; for agents
+      # joining from other machines set AEGIS_CONNECTOR_PUBLIC_ADDR in .env
+      # to the host's DNS name / LAN IP (e.g. aegis.example.com:9090).
+      AEGIS_CONNECTOR_PUBLIC_ADDR: ${AEGIS_CONNECTOR_PUBLIC_ADDR:-localhost:9090}
     ports:
       - "8080:8080"   # HTTP API
+      - "9090:9090"   # gRPC: agent transport + connector enrollment (aegis.connector.v1)
       - "9091:9091"   # Prometheus metrics
-      # 9090 (agent gRPC) kept internal; expose when deploying remote agents:
-      # - "9090:9090"
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -159,6 +166,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.worker
+      args: { AEGIS_VERSION: "${AEGIS_VERSION:-dev}" }
     environment:
       <<: *common-env
     depends_on:
@@ -170,6 +178,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.feed-worker
+      args: { AEGIS_VERSION: "${AEGIS_VERSION:-dev}" }
     environment:
       <<: *common-env
       # Optional NVD API key (https://data.nist.gov): raises the rate limit
@@ -195,6 +204,7 @@ services:
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile.scanner
+      args: { AEGIS_VERSION: "${AEGIS_VERSION:-dev}" }
     environment:
       <<: *common-env
       # Empty uses the first site for a zero-config local demo. Set this in

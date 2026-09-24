@@ -13,7 +13,7 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
-// NATSSubjects is the versioned subject model (spec §78).
+// NATSSubjects is the versioned subject model.
 const (
 	SubScanRequested   = "security.scan.requested.v1"
 	SubScanTask        = "security.scan.task.v1"
@@ -28,6 +28,18 @@ const (
 	SubSensorEvent     = "security.sensor.event.v1"
 	SubDetectionMatch  = "security.detection.match.v1"
 	SubFeedSync        = "security.feed.sync.v1"
+
+	// Realtime streaming subjects (core NATS, deliberately NOT part of any
+	// JetStream stream): job logs and scan state are persisted by the server
+	// itself, notifications are ephemeral. Every subscriber receives every
+	// message (broadcast), which is exactly what the WS fan-out needs.
+	SubScanLog      = "security.scan.log.v1"
+	SubScanState    = "security.scan.state.v1"
+	SubNotification = "security.notification.v1"
+	// Internal fan-out relay: the joblog streamer re-publishes anything a
+	// browser subscriber would care about on this subject so every server
+	// replica (and its local WebSocket conns) sees the same event stream.
+	SubWSFanout = "aegis.internal.ws.fanout.v1"
 )
 
 // StreamNames configures JetStream streams.
@@ -39,7 +51,7 @@ const (
 )
 
 // Bus is the NATS JetStream client wrapper. Delivery is at-least-once;
-// consumers must be idempotent (spec §79).
+// consumers must be idempotent.
 type Bus struct {
 	conn      *nats.Conn
 	js        jetstream.JetStream
@@ -101,6 +113,42 @@ func (b *Bus) Publish(ctx context.Context, subject string, payload []byte) error
 func (b *Bus) PublishSync(ctx context.Context, subject string, payload []byte) error {
 	_, err := b.js.PublishMsg(ctx, &nats.Msg{Subject: subject, Data: payload})
 	return err
+}
+
+// Broadcast publishes on core NATS (no JetStream, no ack): at-most-once,
+// lowest latency, every subscriber gets a copy. This is the right
+// delivery for realtime UI streaming where the durable copy lives in
+// Postgres (job logs) or in the entity row itself (scan state).
+func (b *Bus) Broadcast(subject string, payload []byte) error {
+	if b.conn == nil || !b.conn.IsConnected() {
+		return nats.ErrConnectionClosed
+	}
+	return b.conn.Publish(subject, payload)
+}
+
+// BroadcastSub subscribes to a core-NATS subject. queueGroup empty means
+// every subscriber receives every message (true broadcast); a non-empty
+// queue group load-balances one delivery per group (used so exactly one
+// server replica persists each job log line while all replicas fan out).
+func (b *Bus) BroadcastSub(subject, queueGroup string, handler func(data []byte)) (func(), error) {
+	if b.conn == nil {
+		return nil, nats.ErrConnectionClosed
+	}
+	var sub *nats.Subscription
+	var err error
+	if queueGroup != "" {
+		sub, err = b.conn.QueueSubscribe(subject, queueGroup, func(m *nats.Msg) {
+			handler(m.Data)
+		})
+	} else {
+		sub, err = b.conn.Subscribe(subject, func(m *nats.Msg) {
+			handler(m.Data)
+		})
+	}
+	if err != nil {
+		return nil, err
+	}
+	return func() { _ = sub.Unsubscribe() }, nil
 }
 
 // Subscribe creates a durable pull consumer and starts a handler loop.

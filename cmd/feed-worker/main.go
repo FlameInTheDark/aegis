@@ -1,5 +1,5 @@
 // Command feed-worker synchronizes vulnerability intelligence feeds
-// (NVD, CISA KEV, FIRST EPSS, cvelistV5) on a schedule (spec §5.5, §30).
+// (NVD, CISA KEV, FIRST EPSS, cvelistV5) on a schedule (.5).
 // Feeds run concurrently: a slow bootstrap (NVD full pull, cvelistV5
 // archive) never starves the other sources. The worker also consumes the
 // security.feed.sync.v1 trigger subject so POST /api/v1/feeds/:name/sync
@@ -89,6 +89,17 @@ func run() error {
 			URL: cfg.Feeds.CVEListURL, LastSyncFn: lastSyncOf("cvelistv5"),
 			Meta: feedsRepo},
 	}
+	// Distro advisory plane: enabled via
+	// AEGIS_FEEDS_ENABLED=advisories plus AEGIS_FEED_OVAL_SOURCES.
+	advisoriesRepo := pg.NewAdvisoryRepo(db)
+	if len(cfg.Feeds.OvalSources) > 0 {
+		sources := make([]feeds.OvalSource, 0, len(cfg.Feeds.OvalSources))
+		for _, src := range cfg.Feeds.OvalSources {
+			sources = append(sources, feeds.OvalSource{Family: src.Family, Release: src.Release, URL: src.URL, Compress: src.Compress})
+		}
+		allJobs = append(allJobs, &feeds.OvalJob{Client: client, Advisories: advisoriesRepo, Log: log,
+			Sources: sources, LastSyncFn: lastSyncOf("advisories")})
+	}
 	// AEGIS_FEEDS_ENABLED is the documented kill switch for the heavy
 	// bootstrap downloads (demo / air-gapped deployments). Unknown names are
 	// ignored so the list may mention sources that don't exist yet.
@@ -111,7 +122,7 @@ func run() error {
 		Jobs: jobs,
 	}
 
-	// Register sources with license attribution (§114).
+	// Register sources with license attribution.
 	for _, job := range runner.Jobs {
 		_ = feedsRepo.EnsureSource(ctx, job.Name(), job.License())
 	}

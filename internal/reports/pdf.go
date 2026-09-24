@@ -1,4 +1,4 @@
-// Minimal PDF 1.4 writer for report artifacts (spec §50). Produces real,
+// Minimal PDF 1.4 writer for report artifacts. Produces real,
 // multi-page PDFs with the standard Helvetica/Courier base fonts — no
 // external binary, no CGO — so the worker image stays small and output
 // opens in every PDF viewer. Tabular data uses fixed-pitch Courier columns
@@ -215,6 +215,19 @@ func renderPDF(d *reportData) ([]byte, string, error) {
 
 	// Findings as fixed-pitch rows with a wrapped title column.
 	if len(d.Findings) > 0 {
+		// Human labels for asset references: hostname → primary IP.
+		// Detail reports gather every finding's device, inventory-style
+		// reports the full asset list, so the ASSET column never prints
+		// a machine UUID to a human reader.
+		assetNames := make(map[string]string, len(d.Assets))
+		for _, a := range d.Assets {
+			assetNames[a.ID] = assetLabel(a)
+		}
+		if d.Details != nil {
+			for _, dev := range d.Details.Devices {
+				assetNames[dev.Asset.ID] = assetLabel(dev.Asset)
+			}
+		}
 		c.ensure(h2Size + lead)
 		c.text(pdfMargin, h2Size, "F2", fmt.Sprintf("Findings (%d)", len(d.Findings)))
 		c.y += lead + 2
@@ -231,6 +244,9 @@ func renderPDF(d *reportData) ([]byte, string, error) {
 		c.y += lead
 		for _, f := range d.Findings {
 			asset := f.AssetID
+			if label, ok := assetNames[f.AssetID]; ok && label != "" {
+				asset = label
+			}
 			if len(asset) > assetW {
 				asset = asset[:assetW]
 			}

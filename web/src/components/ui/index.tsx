@@ -2,8 +2,6 @@ import { ReactNode, useState, useEffect, useRef } from 'react'
 import { clsx } from 'clsx'
 import { AlertTriangle, Check, ChevronDown, Loader2 } from 'lucide-react'
 import type { Severity } from '@/types'
-import { Select } from './Select'
-export { Select } from './Select'
 
 export function Button({ children, onClick, variant = 'default', disabled, type = 'button', className }: {
   children: ReactNode
@@ -110,8 +108,15 @@ export function ChipSelect({ label, value, options, onChange, ariaLabel, classNa
   className?: string
 }) {
   return (
-    <Select variant="chip" label={label} aria-label={ariaLabel ?? label}
-      value={value} onValueChange={onChange} options={options} className={className} />
+    <label className={clsx('tbl-chip tbl-chip-select', className)}>
+      <span className="tbl-chip-label">{label}:</span>
+      <select aria-label={ariaLabel ?? label} value={value} onChange={(e) => onChange(e.target.value)}>
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>{o.label}</option>
+        ))}
+      </select>
+      <ChevronDown size={12} aria-hidden className="tbl-chip-caret" />
+    </label>
   )
 }
 
@@ -212,6 +217,18 @@ export function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
       {...props}
       className={clsx(
         'h-8 rounded-sm2 border border-line bg-bg-raise px-2.5 text-[13px] placeholder:text-fg-faint focus:border-accent focus:outline-none',
+        props.className,
+      )}
+    />
+  )
+}
+
+export function Select(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
+  return (
+    <select
+      {...props}
+      className={clsx(
+        'rounded-sm2 border border-line bg-bg-raise px-2 py-1.5 text-[12.5px] focus:border-accent focus:outline-none',
         props.className,
       )}
     />
@@ -382,7 +399,7 @@ export function CopyButton({ text }: { text: string }) {
 
 export function useDebounced<T>(value: T, ms = 300): T {
   const [v, setV] = useState(value)
-  const t = useRef<ReturnType<typeof setTimeout>>()
+  const t = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   useEffect(() => {
     clearTimeout(t.current)
     t.current = setTimeout(() => setV(value), ms)

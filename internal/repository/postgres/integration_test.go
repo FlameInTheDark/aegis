@@ -91,7 +91,18 @@ func TestIntegrationDirtyRecovery(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, stmt := range strings.Split(string(sql), ";") {
+		// Comment lines must go before the ";" split: a semicolon in a
+		// comment ("Data-preserving; only the") cut a statement in half
+		// and made every recovery run fail with a syntax error.
+		var clean strings.Builder
+		for _, line := range strings.Split(string(sql), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "--") {
+				continue
+			}
+			clean.WriteString(line)
+			clean.WriteString("\n")
+		}
+		for _, stmt := range strings.Split(clean.String(), ";") {
 			if strings.TrimSpace(stmt) == "" {
 				continue
 			}

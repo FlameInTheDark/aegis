@@ -1,0 +1,15 @@
+-- version_norm: the ingestion-normalized form of software.version.
+--
+-- Every collected version (SSH dpkg/rpm/apk/pacman sweeps, endpoint
+-- agents, connector scanners, nmap -sV fingerprints) now passes
+-- through fingerprinting.NormalizeObservedVersion at the orchestrator
+-- choke point before it is stored: scanner/banner noise is stripped
+-- and the value is validated + canonicalized under its package
+-- grammar (Debian Policy / rpm / apk / SemVer / PEP 440).
+--
+-- software.version keeps the raw collected string verbatim (audit
+-- evidence, dpkg-exact revision semantics); version_norm is what the
+-- CVE matching pipeline compares against. Rows keep version_norm=''
+-- until their next report refreshes them (every scan re-upserts the
+-- inventory), and matching falls back to the raw value meanwhile.
+ALTER TABLE software ADD COLUMN version_norm TEXT NOT NULL DEFAULT '';

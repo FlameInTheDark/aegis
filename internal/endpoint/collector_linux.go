@@ -66,7 +66,31 @@ func writeJSON(path string, v any) error {
 }
 
 // ---------------------------------------------------------------------------
-// Linux collectors (spec §18): /proc, os-release, package managers.
+// Linux collectors: /proc, os-release, package managers.
+
+// platformOSInfo parses /etc/os-release without shelling out: the family is
+// the distribution ID, the display name the human PRETTY_NAME and the
+// version the numeric VERSION_ID ("ubuntu", "Ubuntu 24.04.1 LTS", "24.04").
+func platformOSInfo() (family, name, version string) {
+	family, name, version = "linux", "", ""
+	values := map[string]string{}
+	data, err := os.ReadFile("/etc/os-release")
+	if err != nil {
+		return family, name, version
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		for _, key := range []string{"ID=", "PRETTY_NAME=", "VERSION_ID="} {
+			if rest, ok := strings.CutPrefix(line, key); ok {
+				values[key] = strings.Trim(rest, "\"")
+			}
+		}
+	}
+	family, name, version = values["ID="], values["PRETTY_NAME="], values["VERSION_ID="]
+	if family == "" {
+		family = "linux"
+	}
+	return family, name, version
+}
 
 // ListeningSockets parses /proc/net/tcp and tcp6 (IPv4/IPv6 listening).
 func (c *Collector) ListeningSockets() []agentv1.NetworkStateReport_Socket {
@@ -95,7 +119,7 @@ func (c *Collector) ListeningSockets() []agentv1.NetworkStateReport_Socket {
 			out = append(out, agentv1.NetworkStateReport_Socket{
 				Protocol: "tcp", LocalIp: ip, LocalPort: int32(port),
 			})
-			if len(out) >= 512 { // bounded output (§17)
+			if len(out) >= 512 { // bounded output
 				return out
 			}
 		}
@@ -162,7 +186,7 @@ func (c *Collector) DNSServers() []string {
 }
 
 // SoftwarePackages enumerates dpkg/rpm/apk packages via direct binary
-// invocation (no shell, arg arrays — spec §18).
+// invocation (no shell, arg arrays ).
 func (c *Collector) SoftwarePackages() []agentv1.SoftwareReport_Package {
 	run := func(bin string, args ...string) []string {
 		ctxDone := false
@@ -211,7 +235,7 @@ func (c *Collector) SoftwarePackages() []agentv1.SoftwareReport_Package {
 	return out
 }
 
-// SecurityPosture reads /proc for basic indicators (best-effort, §17).
+// SecurityPosture reads /proc for basic indicators (best-effort).
 func (c *Collector) SecurityPosture() *agentv1.SecurityPostureReport {
 	p := &agentv1.SecurityPostureReport{
 		AgentId:         c.Cfg.AgentID,

@@ -1,5 +1,5 @@
 // Command server is the Aegis control plane: HTTP API, gRPC agent
-// transport and Prometheus metrics (spec §5.1).
+// transport and Prometheus metrics (.1).
 package main
 
 import (
@@ -16,13 +16,17 @@ import (
 	"time"
 
 	"github.com/FlameInTheDark/aegis/internal/agents"
+	"github.com/FlameInTheDark/aegis/internal/assets"
 	"github.com/FlameInTheDark/aegis/internal/audit"
 	"github.com/FlameInTheDark/aegis/internal/auth"
 	"github.com/FlameInTheDark/aegis/internal/ca"
 	"github.com/FlameInTheDark/aegis/internal/config"
+	"github.com/FlameInTheDark/aegis/internal/connectors"
 	"github.com/FlameInTheDark/aegis/internal/detections"
 	"github.com/FlameInTheDark/aegis/internal/domain"
 	"github.com/FlameInTheDark/aegis/internal/hub"
+	"github.com/FlameInTheDark/aegis/internal/ids"
+	"github.com/FlameInTheDark/aegis/internal/joblog"
 	"github.com/FlameInTheDark/aegis/internal/logging"
 	"github.com/FlameInTheDark/aegis/internal/observability"
 	"github.com/FlameInTheDark/aegis/internal/organizations"
@@ -31,6 +35,7 @@ import (
 	ch "github.com/FlameInTheDark/aegis/internal/repository/clickhouse"
 	pg "github.com/FlameInTheDark/aegis/internal/repository/postgres"
 	redisrepo "github.com/FlameInTheDark/aegis/internal/repository/redis"
+	"github.com/FlameInTheDark/aegis/internal/retention"
 	"github.com/FlameInTheDark/aegis/internal/scanning"
 	"github.com/FlameInTheDark/aegis/internal/telemetry"
 	grpcx "github.com/FlameInTheDark/aegis/internal/transport/grpc"
@@ -46,7 +51,7 @@ import (
 
 // version is overridden at build time via:
 //
-//	go build -ldflags "-X main.version=$(cat VERSION)" ./cmd/server
+//	go build -ldflags "-X main.version=$(git describe --tags)" ./cmd/server
 //
 // so a deployed control plane can report exactly what it is running.
 var version = "dev"
@@ -141,21 +146,47 @@ func run() error {
 	correlator := &vulnerabilities.Correlator{
 		Index: vulnRepo, Findings: pg.NewFindingRepo(db), Evidence: pg.NewEvidenceRepo(db),
 		Assets: assetsRepo, Services: servicesRepo, Software: softwareRepo, Log: log,
+		Advisories: pg.NewAdvisoryRepo(db),
 	}
 	scanRepo, taskRepo, scannerRepo := pg.NewScanRepo(db), pg.NewTaskRepo(db), pg.NewScannerRepo(db)
+	topoRepo := pg.NewTopologyRepo(db)
+	traceRepo := pg.NewTraceRepo(db)
+	// The hub applies reported observations through this orchestrator, so it
+	// needs the SAME ingestion services the embedded scanner wires locally:
+	// without Inventory every host/port/service report failed with "scan
+	// inventory service is not configured" (scans showed stats but created
+	// no assets/services), and without Topology traceroute graphs stayed empty.
+	inventory := &assets.Service{
+		Assets: assetsRepo, Ident: identRepo, Ifaces: ifacesRepo,
+		Services: servicesRepo, Software: softwareRepo, Changes: changesRepo, Log: log,
+		IPStale: assets.IPStaleFromEnv(),
+	}
 	orch := &scanning.Orchestrator{
 		Scans: scanRepo, Tasks: taskRepo, Observations: pg.NewObservationRepo(db),
 		Scanners: scannerRepo, Schedules: pg.NewScheduleRepo(db), Profiles: pg.NewProfileRepo(db),
-		Changes: changesRepo, Assets: assetsRepo, Bus: bus, Log: log,
+		Changes: changesRepo, Assets: assetsRepo, Inventory: inventory, Topology: topoRepo, Traces: traceRepo,
+		Bus: bus, Log: log,
 		AllowPublicScope: cfg.Scanner.AllowPublicScope,
+		Correlator:       correlator,
 	}
 	// Scanner hub: remote agents dial in over gRPC and run scans exactly like
 	// the compose-embedded scanner (they never touch Postgres/NATS directly).
 	scannerHub := hub.New(scanRepo, taskRepo, scannerRepo, orch, bus, log)
 	orch.Hub = scannerHub
+
+	// Startup recovery: a scan that was running when the previous process
+	// died would stay running forever — the claim loop only picks up queued
+	// scans. Close the orphans out (failed, "interrupted by restart")
+	// before the hub and HTTP surface open.
+	if swept, err := orch.RecoverInterrupted(ctx, "interrupted by restart"); err != nil {
+		log.Warn("scan recovery failed", "err", err)
+	} else if swept > 0 {
+		log.Info("scan recovery closed interrupted scans", "count", swept)
+	}
 	agentsSvc := &agents.Service{
-		Repo: pg.NewAgentRepo(db), Tasks: pg.NewAgentTaskRepo(db), EnrollTok: pg.NewEnrollmentRepo(db),
-		Events: pg.NewAgentEventRepo(db), Assets: assetsRepo, Log: log,
+		Repo: pg.NewAgentRepo(db), Tasks: pg.NewAgentTaskRepo(db),
+		Events: pg.NewAgentEventRepo(db), Assets: assetsRepo, Ifaces: pg.NewInterfaceRepo(db),
+		Ident: identRepo, Sites: pg.NewSiteRepo(db), Merger: assetsRepo, IPStale: assets.IPStaleFromEnv(), Log: log,
 	}
 	detectEngine := &detections.Engine{
 		Rules: pg.NewRuleRepo(db), Matches: pg.NewMatchRepo(db), Baselines: pg.NewBaselineRepo(db),
@@ -166,14 +197,20 @@ func run() error {
 		Reports: pg.NewReportRepo(db), Findings: pg.NewFindingRepo(db), Assets: assetsRepo, Details: pg.NewReportDetailRepo(db),
 		Sites: pg.NewSiteRepo(db), Orgs: pg.NewOrgRepo(db), Services: pg.NewServiceRepo(db), Scans: pg.NewScanRepo(db), Store: store, Log: log,
 	}
+	// --- unified external connections (agents / scanners / collectors)
+	connectorsSvc := connectors.New(pg.NewConnectorRepo(db), pg.NewConnectorTokenRepo(db), log,
+		cfg.Connector.PublicAddr, cfg.Connector.EnrollTokenTTL)
+	// kind=scanner connectors materialize a scanners row so the scan UI and
+	// the hub dispatch treat them exactly like token-enrolled scanners.
+	connectorsSvc.Scanners = scannerRepo
 
-	// --- bootstrap (first run, §160)
+	// --- bootstrap (first run)
 	bootstrapIfNeeded(ctx, cfg, orgSvc, log)
 
-	// Seed builtin detection rules for every org once (§40).
+	// Seed builtin detection rules for every org once.
 	seedRules(ctx, pg.NewOrgRepo(db), pg.NewRuleRepo(db), log)
 
-	// Seed the builtin scan profiles once (§68): scans.profile references
+	// Seed the builtin scan profiles once: scans.profile references
 	// scan_profiles(name); without this every POST /scans fails with
 	// FK violation scans_profile_fkey on a fresh database.
 	profilesRepo := pg.NewProfileRepo(db)
@@ -184,6 +221,22 @@ func run() error {
 	}
 
 	// --- HTTP app
+	// Streaming stack: persists job log lines, fans realtime events out
+	// to browser WebSocket subscribers, replaces short polling (v1.13.0).
+	jobLogStore := joblog.NewStore(db)
+	jobLogHub := joblog.NewHub()
+	joblog.NewStreamer(bus, jobLogStore, jobLogHub, log).Start(ctx)
+
+	// --- metrics retention loop (settings-driven ClickHouse TTL + purge).
+	// Started only when the analytics tier exists; the settings store backs
+	// the operator-facing metrics retention knob.
+	settingsRepo := pg.NewSettingsRepo(db)
+	var retentionSvc *retention.Service
+	if chDB != nil {
+		retentionSvc = retention.New(settingsRepo, chDB, log)
+		go retentionSvc.Run(ctx)
+	}
+
 	svc := &httpx.Services{
 		Version: version,
 		Cfg:     cfg, Log: log, Health: health, Bus: bus, Redis: rdb, CH: chDB,
@@ -197,12 +250,14 @@ func run() error {
 		Findings: pg.NewFindingRepo(db), Evidence: pg.NewEvidenceRepo(db),
 		Suppressions: pg.NewSuppressionRepo(db), Notes: pg.NewNoteRepo(db),
 		Rules: pg.NewRuleRepo(db), Matches: pg.NewMatchRepo(db), Baselines: pg.NewBaselineRepo(db),
-		Webhooks: pg.NewWebhookRepo(db), Agents: pg.NewAgentRepo(db), AgentTasks: pg.NewAgentTaskRepo(db),
-		EnrollTokens: pg.NewEnrollmentRepo(db), AgentEvents: pg.NewAgentEventRepo(db),
-		Topology: pg.NewTopologyRepo(db), Reports: pg.NewReportRepo(db),
+		Webhooks: pg.NewWebhookRepo(db),
+		Topology: topoRepo, Traces: traceRepo, Reports: pg.NewReportRepo(db),
+		Groups:  pg.NewGroupRepo(db),
+		JobLogs: jobLogStore, WSHub: jobLogHub,
 		OrgService: orgSvc, Orchestrator: orch, Detections: detectEngine, Ingestor: ingestor,
 		ReportsService: reportsSvc, AgentsService: agentsSvc, Correlator: correlator,
-		AuditService: auditSvc, Store: store,
+		ConnectorsService: connectorsSvc,
+		AuditService:      auditSvc, Retention: retentionSvc, Store: store,
 	}
 	app := httpx.New(svc)
 
@@ -216,19 +271,41 @@ func run() error {
 	// --- metrics endpoint (:9091)
 	go serveMetrics(cfg.MetricsAddr, metrics, log)
 
-	// --- gRPC agent transport (§136)
+	// --- gRPC agent transport
 	authority, err := ca.Load(cfg.AgentCA.CertPath, cfg.AgentCA.KeyPath, !cfg.IsProduction())
 	if err != nil {
 		log.Warn("agent CA unavailable — gRPC enroll disabled", "err", err)
 	}
 	grpcSrv := grpc.NewServer(grpc.Creds(insecure.NewCredentials())) // TLS terminated at LB in production; mTLS documented
+	scannerHub.Connectors = connectorsSvc                            // connector-secret auth for scanner-kind connections
 	scannerHub.Register(grpcSrv)
-	if authority != nil {
-		agentv1.RegisterAgentServiceServer(grpcSrv, &grpcx.AgentServer{Deps: grpcx.Deps{
-			Agents: agentsSvc, Log: log,
-			IssueCert: func(csrPEM, agentID string) (string, error) { return authority.Issue(csrPEM, agentID) },
-		}})
+	// Unified connector service: enrollment, config, heartbeat for ALL
+	// kinds, plus BindDevice (device identity for agent-kind connections).
+	grpcx.RegisterConnectorService(grpcSrv, grpcx.ConnectorDeps{
+		Connectors: connectorsSvc, Agents: agentsSvc, Log: log,
+		IssueCert: func(csrPEM, agentID string) (string, error) {
+			if authority == nil {
+				return "", fmt.Errorf("agent CA not configured")
+			}
+			return authority.Issue(csrPEM, agentID)
+		},
+	})
+	// Endpoint data plane (inventory, tasks, telemetry, metrics). Always
+	// registered: submissions need only connector auth; only device
+	// binding needs the CA. The metrics tier rides on ClickHouse and is
+	// disabled when ClickHouse is not configured (samples dropped, logged).
+	// The sink must stay an UNTYPED nil when ClickHouse is absent: assigning
+	// a typed nil (*ch.DB) into the interface field makes the interface
+	// itself non-nil, the SubmitMetrics guard never fires and the first
+	// sample panics the server on the nil driver connection.
+	var metricsSink grpcx.DeviceMetricsIngest
+	if chDB != nil {
+		metricsSink = chDB
 	}
+	agentv1.RegisterAgentServiceServer(grpcSrv, &grpcx.AgentServer{Deps: grpcx.Deps{
+		Auth: connectorsSvc, Devices: agentsSvc.Repo, Plane: grpcx.AgentsDataPlane{S: agentsSvc}, Log: log,
+		Metrics: metricsSink,
+	}})
 	go func() {
 		lis, err := net.Listen("tcp", cfg.GRPCAddr)
 		if err != nil {
@@ -256,22 +333,63 @@ func run() error {
 	go func() {
 		err := bus.Subscribe(ctx, platform.StreamScan, "correlate-scan-result", func(msg jetstream.Msg) error {
 			var evt struct {
+				ScanID         string `json:"scan_id"`
 				OrganizationID string `json:"organization_id"`
 				State          string `json:"state"`
 			}
 			if err := json.Unmarshal(msg.Data(), &evt); err != nil {
 				return nil // malformed event: ack and move on
 			}
-			if evt.OrganizationID == "" || evt.State != string(domain.ScanCompleted) {
+			// Scan-completion events have historically carried only
+			// scan_id+state; resolve the org from the scan row so hub
+			// (connector/remote) scans correlate too instead of being
+			// silently skipped.
+			orgID := evt.OrganizationID
+			if orgID == "" && evt.ScanID != "" {
+				if scan, err := scanRepo.ByID(ctx, "", evt.ScanID); err == nil {
+					orgID = scan.OrganizationID
+				}
+			}
+			if orgID == "" {
 				return nil
 			}
-			n, err := correlator.SweepOrg(ctx, evt.OrganizationID)
+			// Lifecycle notifications ride the broadcast subject so open
+			// browsers toast instantly instead of discovering the change
+			// on their next poll. The scan name personalizes the toast.
+			scanName := ""
+			if scan, err := scanRepo.ByID(ctx, "", evt.ScanID); err == nil {
+				scanName = scan.Name
+			}
+			switch evt.State {
+			case string(domain.ScanCompleted):
+				joblog.PublishNotification(ctx, bus, &domain.NotificationEvent{
+					ID: ids.New(), OrgID: orgID, Type: domain.NotifyScanCompleted,
+					Title:    "Scan completed: " + scanName,
+					Body:     "Results merged into inventory; correlation follows.",
+					Severity: "info", Ref: map[string]string{"scan_id": evt.ScanID},
+				})
+			case string(domain.ScanFailed):
+				joblog.PublishNotification(ctx, bus, &domain.NotificationEvent{
+					ID: ids.New(), OrgID: orgID, Type: domain.NotifyScanFailed,
+					Title:    "Scan failed: " + scanName,
+					Severity: "high", Ref: map[string]string{"scan_id": evt.ScanID},
+				})
+			default:
+				return nil
+			}
+			n, err := correlator.SweepOrg(ctx, orgID)
 			if err != nil {
 				log.Warn("post-scan correlation failed", "org", evt.OrganizationID, "err", err)
 				return err // nack: at-least-once redelivery
 			}
 			if n > 0 {
 				log.Info("post-scan correlation created findings", "org", evt.OrganizationID, "findings", n)
+				joblog.PublishNotification(ctx, bus, &domain.NotificationEvent{
+					ID: ids.New(), OrgID: orgID, Type: domain.NotifyFindingsCreated,
+					Title:    fmt.Sprintf("%d new findings raised", n),
+					Body:     "Open Detections to triage the new matches.",
+					Severity: "medium", Ref: map[string]string{"count": fmt.Sprintf("%d", n)},
+				})
 			}
 			return nil
 		})

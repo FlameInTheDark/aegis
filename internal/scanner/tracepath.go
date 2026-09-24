@@ -20,27 +20,27 @@ import (
 // hops — the caller then falls through to its normal empty/error handling.
 // Unresponsive hops ("2:  no reply") are skipped, NOT treated as route
 // failure: the returned path simply has TTL gaps.
-func tracepathTraceroute(ctx context.Context, target string, limits Limits) ([]Hop, bool) {
+func tracepathTraceroute(ctx context.Context, target string, limits Limits) (Trace, bool) {
 	bin := tracepathBin()
 	if bin == "" {
-		return nil, false
+		return Trace{}, false
 	}
 	// tracepath only traces the host itself; strip any CIDR suffix the way
 	// the rest of the engine does before validating.
 	host := strings.Split(target, "/")[0]
 	if !isIPv4(host) {
-		return nil, false // iputils tracepath(6) output differs; nmap attempts cover v6
+		return Trace{}, false // iputils tracepath(6) output differs; nmap attempts cover v6
 	}
 	limits.MaxRuntime = 60 * time.Second
 	stdout, _, code, err := run(ctx, limits, []string{bin, "-n", host})
 	if err != nil || code != 0 {
-		return nil, false
+		return Trace{}, false
 	}
 	hops := parseTracepath(stdout, host)
 	if len(hops) == 0 {
-		return nil, false
+		return Trace{}, false
 	}
-	return hops, true
+	return Trace{Hops: hops, Method: "tracepath", Raw: string(stdout)}, true
 }
 
 // tracepathBin resolves the tracepath binary: AEGIS_SCANNER_TRACEPATH_PATH

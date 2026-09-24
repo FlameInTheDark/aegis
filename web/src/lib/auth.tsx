@@ -24,6 +24,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { api, clearAccessToken, onSessionLost, refreshSession, setAccessToken } from '@/lib/api'
+import { ws } from '@/lib/ws'
 
 export type AuthStatus = 'initializing' | 'authenticated' | 'unauthenticated'
 
@@ -55,7 +56,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('initializing')
   const [user, setUser] = useState<AuthUser | null>(null)
   const queryClient = useQueryClient()
-  const restoreRef = useRef<() => Promise<void>>()
+  const restoreRef = useRef<(() => Promise<void>) | undefined>(undefined)
 
   // restore runs on first mount (page load / hard reload): attempt to
   // revive the session purely through the refresh cookie.
@@ -148,6 +149,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Server first: revoke the refresh family + clear the cookie. Then
     // local state. Then broadcast so other tabs follow immediately.
     await api.logout()
+    ws.disconnect() // drop the streaming socket with the session
     setUser(null)
     setStatus('unauthenticated')
     queryClient.clear()

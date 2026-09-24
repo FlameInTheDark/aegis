@@ -1,0 +1,25 @@
+{
+  "branches": ["main"],
+  "tagFormat": "v${version}",
+  "plugins": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/release-notes-generator",
+    ["@semantic-release/changelog", {
+      "changelogTitle": "# Changelog\n\nAll notable changes to the Aegis Security Platform are documented here.\nFormat follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)."
+    }],
+    ["@semantic-release/exec", {
+      "prepareCmd": "bash scripts/package-release.sh ${nextRelease.version}"
+    }],
+    ["@semantic-release/git", {
+      "assets": ["CHANGELOG.md"],
+      "message": "chore(release): v${nextRelease.version} [skip ci]"
+    }],
+    ["@semantic-release/github", {
+      "assets": [
+        { "path": "download/aegis-v*.tar.gz", "label": "Source archive (tar.gz)" },
+        { "path": "download/aegis-v*.zip", "label": "Source archive (zip)" },
+        { "path": "download/aegis-v*.sha256", "label": "Checksums (sha256)" }
+      ]
+    }]
+  ]
+}

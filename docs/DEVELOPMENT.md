@@ -47,11 +47,11 @@ make lint             # gofmt -l + go vet
 cd web && npm ci && npm run build
 ```
 
-Test suites cover the matching engine (table-driven CPE/range/OSV/heuristic cases), scope safety validation, the risk engine and RBAC. Feed and sensor fixtures live in `testdata/` — synthetic only; the suite never touches real networks (§105).
+Test suites cover the matching engine (table-driven CPE/range/OSV/heuristic cases), scope safety validation, the risk engine and RBAC. Feed and sensor fixtures live in `testdata/` — synthetic only; the suite never touches real networks.
 
 ## Adding a migration
 
-Create `migrations/postgres/00NN_name.{up,down}.sql` (embedded automatically). Never mutate schema in startup code (§110). The CI job fails when an `.up.sql` lacks its `.down.sql` pair.
+Create `migrations/postgres/00NN_name.{up,down}.sql` (embedded automatically). Never mutate schema in startup code. The CI job fails when an `.up.sql` lacks its `.down.sql` pair.
 
 ## Frontend
 
@@ -69,7 +69,7 @@ Inside Docker this fails frequently:
 What Aegis does to cope:
 
 1. The traceroute engine uses a five-step probe ladder, most NAT-friendly first:
-   TCP SYN+ACK probes (`-PS`/`-PA`) → **UDP probes (`-PU`, elicit ICMP port-unreachable from the target)** → ICMP echo (`-PE -PP`) → TCP-connect trace (`-sT --traceroute`, whose *target* reply is a plain RST that survives NATs) → **the standalone `tracepath` binary** (UDP-based, needs no raw sockets at all; the scanner image ships it, `AEGIS_SCANNER_TRACEPATH_PATH` overrides the lookup). The first attempt that returns any hops wins; the chosen method is recorded on the topology observation.
+ TCP SYN+ACK probes (`-PS`/`-PA`) → **UDP probes (`-PU`, elicit ICMP port-unreachable from the target)** → ICMP echo (`-PE -PP`) → TCP-connect trace (`-sT --traceroute`, whose *target* reply is a plain RST that survives NATs) → **the standalone `tracepath` binary** (UDP-based, needs no raw sockets at all; the scanner image ships it, `AEGIS_SCANNER_TRACEPATH_PATH` overrides the lookup). The first attempt that returns any hops wins; the chosen method is recorded on the topology observation.
 2. **Blocked probes are never "no route"**: unresponsive hops are simply absent from the path (TTL gaps), partial paths link the deepest reachable hop to the asset with an `observed_through` edge, and when *every* method fails the observation is emitted as `method: gateway-guess` at low confidence (0.5) instead of being dropped — the topology still shows the subnet structure while honestly flagging it as inferred.
 3. The scanner container ships `traceroute` (UDP/ICMP/TCP probe methods), `tracepath` and `iproute2`, and a built-in verification script: `docker compose exec scanner verify-traceroute` checks the container's capabilities (NET_RAW), file caps on nmap/traceroute, `ip route`, and runs live UDP/ICMP/TCP traceroutes plus tracepath against 1.1.1.1, ending with plain-language verdicts (whether TCP/443 reached the target — the decisive signal — and whether nmap emitted traceroute XML).
 

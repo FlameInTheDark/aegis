@@ -15,34 +15,43 @@ const (
 	ProfileFullAudit        ScanProfile = "full_audit"
 	ProfileTrace            ScanProfile = "trace"
 	ProfileFingerprint      ScanProfile = "fingerprint"
+	// ProfileSSHInventory collects installed OS packages from configured
+	// hosts over SSH (agent-less, vuls-style fast scan; read-only
+	// commands, no port probing). Targets are the per-scan SSH host list
+	// (scan config); without one the scanner's SSH collector
+	// configuration is used.
+	ProfileSSHInventory ScanProfile = "ssh_inventory"
 )
 
 // ProfileDefinition describes what a profile permits. Scans are only allowed
 // to request capabilities contained in their profile.
 type ProfileDefinition struct {
-	Name          ScanProfile
-	Description   string
-	HostDiscovery bool
-	TopTCPPorts   int // 0 = top 100, explicit numbers override
-	TopUDPPorts   int
-	FullPortScan  bool
-	ServiceDetect bool
+	Name          ScanProfile `json:"name"`
+	Description   string      `json:"description"`
+	HostDiscovery bool        `json:"host_discovery,omitempty"`
+	TopTCPPorts   int         `json:"top_tcp_ports,omitempty"` // 0 = top 100, explicit numbers override
+	TopUDPPorts   int         `json:"top_udp_ports,omitempty"`
+	FullPortScan  bool        `json:"full_port_scan,omitempty"`
+	ServiceDetect bool        `json:"service_detect,omitempty"`
 	// ServiceLite runs ONE batched `nmap -sV --version-light` pass per host
 	// over the ports found in phase 2, instead of the per-port intensity-5
 	// probing ServiceDetect does. Cheap, but enough to harvest the service
 	// table's ostype and OS CPEs — the OS signal that keeps working where
 	// -O cannot (raw-socket-less environments, NATs that filter the
 	// open+closed port pair TCP/IP fingerprinting needs).
-	ServiceLite    bool
-	OSDetect       bool
-	Traceroute     bool // build network topology by tracing the path to each host
-	SafeNSE        bool
-	ZgrabEnrich    bool
-	SafeValidation bool
-	ElevatedReqs   bool // requires PermScanElevated + confirmation
-	MaxTargets     int
-	MaxPacketRate  int
-	Warning        string
+	ServiceLite    bool `json:"service_lite,omitempty"`
+	OSDetect       bool `json:"os_detect,omitempty"`
+	Traceroute     bool `json:"traceroute,omitempty"` // build network topology by tracing the path to each host
+	SafeNSE        bool `json:"safe_nse,omitempty"`
+	ZgrabEnrich    bool `json:"zgrab_enrich,omitempty"`
+	SafeValidation bool `json:"safe_validation,omitempty"`
+	ElevatedReqs   bool `json:"elevated_reqs,omitempty"` // requires PermScanElevated + confirmation
+	// SSHCollect runs the agent-less SSH package collection phase instead
+	// of the nmap port-scan pipeline.
+	SSHCollect    bool   `json:"ssh_collect,omitempty"`
+	MaxTargets    int    `json:"max_targets,omitempty"`
+	MaxPacketRate int    `json:"max_packet_rate,omitempty"`
+	Warning       string `json:"warning,omitempty"`
 	// ExtraArgs are additional, server-validated nmap arguments that custom
 	// presets append to every nmap phase (allowlist-checked by
 	// scanning.ValidateNmapArgs before storage; never user-raw).
@@ -99,6 +108,11 @@ var Profiles = map[ScanProfile]ProfileDefinition{
 		Description:   "Fast topology trace: ping sweep + traceroute only — no port scans. Maps how devices connect (gateway → routers → hosts) in seconds.",
 		HostDiscovery: true, TopTCPPorts: 0, ServiceDetect: false, OSDetect: false, Traceroute: true,
 		MaxTargets: 4096, MaxPacketRate: 400,
+	},
+	ProfileSSHInventory: {
+		Name:        ProfileSSHInventory,
+		Description: "Agent-less SSH inventory: distro detection and installed-package collection over SSH (read-only commands), feeding the advisory correlation engine.",
+		SSHCollect:  true, MaxTargets: 256,
 	},
 	ProfileFingerprint: {
 		Name:          ProfileFingerprint,
@@ -159,6 +173,31 @@ type ScanScope struct {
 	ExcludeHosts []string `json:"exclude_hosts,omitempty"`
 }
 
+// SSHScanHost is one per-scan SSH inventory target with its own
+// credentials. The list travels inside the scan config, so every
+// executor kind (embedded scanner, hub agent, aegis-connector) runs
+// exactly the targets the operator picked in the scan dialog.
+type SSHScanHost struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port,omitempty"` // 0 = default 22
+	Username string `json:"username"`
+	// Auth selects the credential: password or key. An empty auth is
+	// resolved from whichever secret is set.
+	Auth     string `json:"auth,omitempty"`
+	Password string `json:"password,omitempty"`
+	// KeyPEM carries the OpenSSH/PEM private key material for auth=key.
+	KeyPEM string `json:"key_pem,omitempty"`
+	// PinnedKey pins the host's SSH host key (authorized_keys format):
+	// when set, the handshake must present exactly this key. Public
+	// material — echoed back in scan config views, never redacted.
+	PinnedKey string `json:"pinned_key,omitempty"`
+}
+
+const (
+	SSHAuthPassword = "password"
+	SSHAuthKey      = "key"
+)
+
 // ScanConfig is the exact, reproducible configuration of a scan.
 type ScanConfig struct {
 	Profile           ScanProfile `json:"profile"`
@@ -177,6 +216,17 @@ type ScanConfig struct {
 	// ExtraArgs carries a custom preset's validated nmap arguments so any
 	// engine (and later re-runs) reproduces the exact same probes.
 	ExtraArgs []string `json:"extra_args,omitempty"`
+
+	// SSHHosts carries per-scan SSH inventory targets with per-host
+	// credentials (ssh_inventory profile). When empty, the executor
+	// falls back to the scanner's own SSH collector configuration.
+	SSHHosts []SSHScanHost `json:"ssh_hosts,omitempty"`
+
+	// SSHInsecureHostKey accepts any SSH host key for this scan (explicit
+	// lab posture, stored reproducibly with the scan config). Precedence
+	// per host: PinnedKey > this flag > scanner connection ssh_insecure /
+	// ssh_pinned_key > AEGIS_SSH_SCAN_HOST_KEY_POLICY env > refuse.
+	SSHInsecureHostKey bool `json:"ssh_insecure_host_key,omitempty"`
 }
 
 // Scan is one orchestration unit.
@@ -203,18 +253,54 @@ type Scan struct {
 	CompletedAt    *time.Time  `json:"completed_at,omitempty"`
 }
 
-// ScanStats are live counters shown in the UX (spec §116).
+// ScanStats are live counters shown in the UX.
 type ScanStats struct {
 	Targets               int `json:"targets"`
 	Reachable             int `json:"reachable"`
 	Unreachable           int `json:"unreachable"`
 	PortsDiscovered       int `json:"ports_discovered"`
 	ServicesFingerprinted int `json:"services_fingerprinted"`
-	FindingsCreated       int `json:"findings_created"`
-	CriticalFindings      int `json:"critical_findings"`
-	TasksTotal            int `json:"tasks_total"`
-	TasksDone             int `json:"tasks_done"`
-	TasksFailed           int `json:"tasks_failed"`
+	// PackagesCollected counts OS packages recorded by agent/SSH
+	// inventory collection.
+	PackagesCollected int `json:"packages_collected"`
+	FindingsCreated   int `json:"findings_created"`
+	CriticalFindings  int `json:"critical_findings"`
+	TasksTotal        int `json:"tasks_total"`
+	TasksDone         int `json:"tasks_done"`
+	TasksFailed       int `json:"tasks_failed"`
+	// SSHHosts summarizes what the agent-less SSH collector executed and
+	// obtained per host (ssh_inventory scans). Empty for network scans.
+	SSHHosts []SSHHostSummary `json:"ssh_hosts,omitempty"`
+}
+
+// SSHCommandRun records one read-only command the SSH collector executed on
+// a host: the fixed command string, whether it succeeded and how many
+// output lines it produced. Command strings are compile-time constants, so
+// the log never carries host-controlled content beyond those counts.
+type SSHCommandRun struct {
+	Cmd   string `json:"cmd"`
+	OK    bool   `json:"ok"`
+	Lines int    `json:"lines"`
+	Err   string `json:"err,omitempty"`
+}
+
+// SSHHostSummary is the per-host result summary of an SSH inventory scan:
+// what was collected (OS, package count), how long it took, which commands
+// ran and why a host was unreachable. Persisted in scans.stats (JSONB) and
+// rendered by the scan view so "what exactly was scanned over SSH" is
+// always answerable.
+type SSHHostSummary struct {
+	Host         string          `json:"host"`
+	Port         int             `json:"port,omitempty"`
+	User         string          `json:"user,omitempty"`
+	OSFamily     string          `json:"os_family,omitempty"`
+	OSName       string          `json:"os_name,omitempty"`
+	OSVersion    string          `json:"os_version,omitempty"`
+	OSOK         bool            `json:"os_ok"`
+	PackageCount int             `json:"package_count"`
+	Commands     []SSHCommandRun `json:"commands,omitempty"`
+	DurationMS   int64           `json:"duration_ms"`
+	Error        string          `json:"error,omitempty"`
 }
 
 // ScanTask is a unit of work within a scan.
@@ -233,7 +319,7 @@ type ScanTask struct {
 	FinishedAt *time.Time `json:"finished_at,omitempty"`
 }
 
-// Observation is a normalized scanner result (spec §137).
+// Observation is a normalized scanner result.
 type Observation struct {
 	ID              string         `json:"id"`
 	ScanID          string         `json:"scan_id"`
@@ -252,18 +338,22 @@ type Observation struct {
 
 // Scanner is a registered distributed scanning worker.
 type Scanner struct {
-	ID             string    `json:"id"`
-	OrganizationID string    `json:"organization_id"`
-	SiteID         string    `json:"site_id"`
-	Name           string    `json:"name"`
-	Version        string    `json:"version"`
-	Capabilities   []string  `json:"capabilities"`
-	Interfaces     []string  `json:"interfaces,omitempty"`
-	Health         string    `json:"health"`     // healthy|degraded|offline
-	Transport      string    `json:"transport"`  // nats (embedded) | grpc (hub agent)
-	IsDefault      bool      `json:"is_default"` // org-level default scanner
-	LastSeen       time.Time `json:"last_seen"`
-	CreatedAt      time.Time `json:"created_at"`
+	ID             string   `json:"id"`
+	OrganizationID string   `json:"organization_id"`
+	SiteID         string   `json:"site_id"`
+	Name           string   `json:"name"`
+	Version        string   `json:"version"`
+	Capabilities   []string `json:"capabilities"`
+	Interfaces     []string `json:"interfaces,omitempty"`
+	Health         string   `json:"health"`     // healthy|degraded|offline
+	Transport      string   `json:"transport"`  // nats (embedded) | grpc (hub agent) | connector (aegis-connector)
+	IsDefault      bool     `json:"is_default"` // org-level default scanner
+	// ConnectorID links the row to its owning connectors record when the
+	// scanner was created through the unified external-connection plane
+	// (empty for legacy token-enrolled scanners).
+	ConnectorID string    `json:"connector_id,omitempty"`
+	LastSeen    time.Time `json:"last_seen"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // ScanSchedule is a recurring scan definition.
@@ -283,7 +373,7 @@ type ScanSchedule struct {
 	CreatedAt      time.Time   `json:"created_at"`
 }
 
-// ChangeType enumerates deltas produced between scans (spec §26).
+// ChangeType enumerates deltas produced between scans.
 type ChangeType string
 
 const (

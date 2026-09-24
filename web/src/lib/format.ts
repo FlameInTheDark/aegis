@@ -44,6 +44,27 @@ export function relTime(iso?: string): string {
   return d.toLocaleDateString()
 }
 
+// untilTime formats a FUTURE timestamp as a countdown ("in 5m", "in 23h",
+// "in 6d"); once the moment passes it degrades to the relTime "ago" form.
+// relTime is past-only — fed an expiry it always answers "just now", which
+// is exactly how the connect-command dialog ended up claiming every fresh
+// token "expires just now" for its whole 24h lifetime.
+export function untilTime(iso?: string): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '—'
+  const secs = Math.floor((d.getTime() - Date.now()) / 1000)
+  if (secs < -60) return relTime(iso)
+  if (secs <= 0) return 'any second'
+  if (secs < 60) return `in ${secs}s`
+  const mins = Math.floor(secs / 60)
+  if (mins < 60) return `in ${mins}m`
+  const hours = Math.floor(mins / 60)
+  if (hours < 48) return `in ${hours}h`
+  const days = Math.floor(hours / 24)
+  return `in ${days}d`
+}
+
 export function exactTime(iso?: string): string {
   if (!iso) return ''
   return new Date(iso).toISOString().replace('T', ' ').slice(0, 19) + ' UTC'
@@ -52,6 +73,26 @@ export function exactTime(iso?: string): string {
 export function fmtNum(n?: number | null): string {
   if (n === null || n === undefined) return '—'
   return n.toLocaleString()
+}
+
+// fmtBytes renders a byte count with binary units (KiB/MiB/GiB/TiB).
+export function fmtBytes(n?: number | null): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return '—'
+  if (n < 1024) return `${Math.round(n)} B`
+  const units = ['KiB', 'MiB', 'GiB', 'TiB', 'PiB']
+  let v = n
+  let i = -1
+  do {
+    v /= 1024
+    i++
+  } while (v >= 1024 && i < units.length - 1)
+  return `${v >= 100 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`
+}
+
+// fmtBps renders a bytes-per-second throughput.
+export function fmtBps(n?: number | null): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return '—'
+  return `${fmtBytes(n)}/s`
 }
 
 export function statusColor(state: string): string {

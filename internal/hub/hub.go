@@ -1,4 +1,4 @@
-// Package hub implements the gRPC scanner hub (spec §5.3/§69): remote
+// Package hub implements the gRPC scanner hub (.3/): remote
 // scanners installed on physical hosts dial the server over gRPC and run
 // scans exactly like the compose-embedded scanner, without needing direct
 // Postgres/NATS access.
@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/FlameInTheDark/aegis/internal/domain"
+	"github.com/FlameInTheDark/aegis/internal/platform"
 	"github.com/FlameInTheDark/aegis/internal/repository/postgres"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -66,6 +67,8 @@ type Report struct {
 	Stats        *domain.ScanStats    `json:"stats,omitempty"`
 	TaskState    string               `json:"task_state,omitempty"`
 	ScanError    string               `json:"scan_error,omitempty"`
+	// Logs streams structured job log lines alongside the state report.
+	Logs []domain.JobLogEvent `json:"logs,omitempty"`
 }
 
 // ScanView is the kill-switch readback for agent-side cancellation.
@@ -79,20 +82,33 @@ type Orch interface {
 	RecordObservation(ctx context.Context, obs *domain.Observation) error
 }
 
+// ConnectorAuth lets the hub authenticate aegis-connector credentials as an
+// alternative to legacy scanner enrollment tokens, so a connector of
+// kind=scanner can run the SAME hub protocol with its long-lived connector
+// secret (unified connection plane, per-kind logic on top).
+type ConnectorAuth interface {
+	// Authenticate verifies id+secret and returns the connector record
+	// (revoked/unknown rejected).
+	Authenticate(ctx context.Context, connectorID, secret string) (*domain.Connector, error)
+}
+
 // BusPublisher publishes the scan-result event that triggers server-side
-// CVE correlation when an agent reports a completed scan.
+// CVE correlation when an agent reports a completed scan, plus the
+// core-NATS broadcast used to stream job logs / state to browsers.
 type BusPublisher interface {
 	Publish(ctx context.Context, subject string, payload []byte) error
+	Broadcast(subject string, payload []byte) error
 }
 
 // Hub serves remote scanners.
 type Hub struct {
-	Scans    *postgres.ScanRepo
-	Tasks    *postgres.TaskRepo
-	Scanners *postgres.ScannerRepo
-	Orch     Orch
-	Bus      BusPublisher
-	Log      *slog.Logger
+	Scans      *postgres.ScanRepo
+	Tasks      *postgres.TaskRepo
+	Scanners   *postgres.ScannerRepo
+	Connectors ConnectorAuth
+	Orch       Orch
+	Bus        BusPublisher
+	Log        *slog.Logger
 
 	mu      sync.Mutex
 	live    map[string]*scanStream
@@ -210,19 +226,58 @@ func (jsonCodec) Unmarshal(data []byte, v any) error {
 
 func init() { encoding.RegisterCodec(jsonCodec{}) }
 
-// auth resolves the scanner from the per-call token.
+// auth resolves the scanner from the per-call token. Two credential kinds
+// are accepted:
+//
+//   - x-scanner-token: the legacy hub enrollment token ( scanners.token_hash)
+//   - x-aegis-connector-id / x-aegis-connector-secret: connector-plane
+//     credentials; the connector must be active, of kind=scanner, and own a
+//     scanners row (materialized at connector enrollment).
 func (h *Hub) auth(ctx context.Context) (*domain.Scanner, error) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
 		return nil, status.Error(codes.Unauthenticated, "missing metadata")
 	}
-	toks := md.Get("x-scanner-token")
-	if len(toks) == 0 || toks[0] == "" {
-		return nil, status.Error(codes.Unauthenticated, "missing scanner token")
+	if toks := md.Get("x-scanner-token"); len(toks) > 0 && toks[0] != "" {
+		sc, err := h.Scanners.ByTokenHash(ctx, HashToken(toks[0]))
+		if err != nil {
+			return nil, status.Error(codes.Unauthenticated, "unknown scanner token")
+		}
+		return sc, nil
 	}
-	sc, err := h.Scanners.ByTokenHash(ctx, HashToken(toks[0]))
+	if ids := md.Get("x-aegis-connector-id"); len(ids) > 0 && ids[0] != "" {
+		secrets := md.Get("x-aegis-connector-secret")
+		if len(secrets) == 0 || secrets[0] == "" {
+			return nil, status.Error(codes.Unauthenticated, "missing connector secret")
+		}
+		return h.authConnector(ctx, ids[0], secrets[0])
+	}
+	return nil, status.Error(codes.Unauthenticated, "missing scanner token")
+}
+
+// authConnector validates connector credentials and maps them onto the
+// scanners row the connector owns. The row is created on demand so an
+// enrollment that raced a hub connection can never dead-end.
+func (h *Hub) authConnector(ctx context.Context, id, secret string) (*domain.Scanner, error) {
+	if h.Connectors == nil {
+		return nil, status.Error(codes.Unauthenticated, "connector auth not configured")
+	}
+	conn, err := h.Connectors.Authenticate(ctx, id, secret)
 	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, "unknown scanner token")
+		return nil, status.Error(codes.Unauthenticated, "connector credentials rejected")
+	}
+	if conn.Kind != domain.ConnectorScanner {
+		return nil, status.Error(codes.PermissionDenied, "this connection is not a scanner")
+	}
+	sc, err := h.Scanners.ByConnectorID(ctx, conn.ID)
+	if err != nil {
+		sc = &domain.Scanner{
+			OrganizationID: conn.OrganizationID, SiteID: conn.SiteID,
+			Name: conn.Name, Transport: "connector", ConnectorID: conn.ID,
+		}
+		if err := h.Scanners.EnsureForConnector(ctx, sc); err != nil {
+			return nil, status.Error(codes.Internal, "could not materialize scanner")
+		}
 	}
 	return sc, nil
 }
@@ -252,12 +307,21 @@ type JobsReq struct{}
 
 func (h *Hub) callRegister(ctx context.Context, raw []byte) ([]byte, error) {
 	var req RegisterReq
-	if err := json.Unmarshal(raw, &req); err != nil || req.Token == "" {
-		return nil, status.Error(codes.InvalidArgument, "token required")
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, status.Error(codes.InvalidArgument, "bad register request")
 	}
-	sc, err := h.Scanners.ByTokenHash(ctx, HashToken(req.Token))
-	if err != nil {
-		return nil, status.Error(codes.Unauthenticated, "unknown enrollment token")
+	var sc *domain.Scanner
+	var err error
+	if req.Token != "" {
+		sc, err = h.Scanners.ByTokenHash(ctx, HashToken(req.Token))
+		if err != nil {
+			return nil, status.Error(codes.Unauthenticated, "unknown enrollment token")
+		}
+	} else {
+		// Connector mode: identity rides in the metadata; token stays empty.
+		if sc, err = h.auth(ctx); err != nil {
+			return nil, err
+		}
 	}
 	if req.Name != "" {
 		sc.Name = req.Name
@@ -296,8 +360,10 @@ func (h *Hub) jobsHandler(srv any, stream grpc.ServerStream) error {
 	hn.mu.Unlock()
 	defer func() {
 		hn.mu.Lock()
+		isCurrent := false
 		if cur, ok := hn.live[sc.ID]; ok && cur == st {
 			delete(hn.live, sc.ID)
+			isCurrent = true
 		}
 		var rest []*Envelope
 		for {
@@ -313,6 +379,17 @@ func (h *Hub) jobsHandler(srv any, stream grpc.ServerStream) error {
 			hn.pending[sc.ID] = append(hn.pending[sc.ID], rest...)
 		}
 		hn.mu.Unlock()
+		// The stream is gone: the scanner can no longer receive jobs, so it
+		// must not stay healthy. Only the CURRENT stream takes the row down
+		// (a replaced stream must not race the newcomer's Register back to
+		// offline); last_seen freshness covers anything this misses.
+		if isCurrent {
+			hctx, hcancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := hn.Scanners.SetHealth(hctx, sc.ID, "offline"); err != nil {
+				hn.Log.Warn("hub: could not mark disconnected scanner offline", "scanner", sc.ID, "err", err)
+			}
+			hcancel()
+		}
 		st.stop()
 	}()
 	hn.Log.Info("hub: scanner connected", "scanner", sc.ID, "name", sc.Name)
@@ -324,7 +401,7 @@ func (h *Hub) jobsHandler(srv any, stream grpc.ServerStream) error {
 	}
 	ping := time.NewTicker(25 * time.Second)
 	defer ping.Stop()
-	seen := time.NewTicker(60 * time.Second)
+	seen := time.NewTicker(30 * time.Second)
 	defer seen.Stop()
 	for {
 		select {
@@ -365,6 +442,19 @@ func (h *Hub) callReport(ctx context.Context, raw []byte) ([]byte, error) {
 }
 
 func (h *Hub) applyReport(ctx context.Context, rep *Report) error {
+	// Job log lines ride their own broadcast subject; the org id is
+	// resolved from the scan row once and stamped for tenancy filtering.
+	if len(rep.Logs) > 0 && h.Bus != nil {
+		orgID := h.orgForScan(ctx, rep.ScanID)
+		for i := range rep.Logs {
+			e := rep.Logs[i]
+			e.ScannerID = rep.ScannerID
+			e.OrgID = orgID
+			if b, err := json.Marshal(&e); err == nil {
+				_ = h.Bus.Broadcast(platform.SubScanLog, b)
+			}
+		}
+	}
 	for i := range rep.Observations {
 		obs := rep.Observations[i]
 		if obs.ScanID == "" {
@@ -378,29 +468,81 @@ func (h *Hub) applyReport(ctx context.Context, rep *Report) error {
 		_ = h.Tasks.UpdateState(ctx, rep.TaskID, domain.TaskState(rep.TaskState), rep.ScanError)
 	}
 	if rep.ScanID != "" {
+		// One org lookup per report for every broadcast below (the resolved
+		// id also rides on stats-only events so WS tenancy accepts them).
+		orgID := ""
+		if h.Bus != nil && (rep.ScanState != "" || rep.Stats != nil) {
+			orgID = h.orgForScan(ctx, rep.ScanID)
+		}
 		if rep.ScanState != "" {
-			progress := 0.0
+			// Absent progress means "keep the current value": a final
+			// state-only report must never regress 100 to 0. Completion
+			// is clamped to 100 regardless.
+			progress := -1.0
 			if rep.Progress != nil {
 				progress = *rep.Progress
 			}
+			if rep.ScanState == string(domain.ScanCompleted) && progress < 0 {
+				progress = 100
+			}
 			_ = h.Scans.UpdateState(ctx, rep.ScanID, domain.ScanState(rep.ScanState), rep.Phase, progress)
+			// Live progress for browsers: broadcast the state delta so
+			// open scan views stop short-polling for updates.
+			if h.Bus != nil {
+				// Progress rides the report pointer: nil keeps what the
+				// browser already shows instead of resetting it.
+				evt, _ := json.Marshal(&domain.ScanStateEvent{
+					ScanID: rep.ScanID, OrgID: orgID,
+					State: rep.ScanState, Phase: rep.Phase, Progress: rep.Progress,
+					Stats: rep.Stats, Ts: time.Now().UTC(), ScannerID: rep.ScannerID,
+				})
+				_ = h.Bus.Broadcast(platform.SubScanState, evt)
+			}
 		}
 		if rep.Stats != nil {
 			_ = h.Scans.UpdateStats(ctx, rep.ScanID, *rep.Stats)
+			// Stats-only reports (no state transition) broadcast too:
+			// reachable/ports/services/findings move in the open scan view
+			// between phase changes instead of freezing until the next
+			// phase boundary (hub reports carry stats separately from state).
+			if h.Bus != nil && rep.ScanState == "" {
+				evt, _ := json.Marshal(&domain.ScanStateEvent{
+					ScanID: rep.ScanID, OrgID: orgID,
+					Stats: rep.Stats, Ts: time.Now().UTC(), ScannerID: rep.ScannerID,
+				})
+				_ = h.Bus.Broadcast(platform.SubScanState, evt)
+			}
 		}
 		if rep.ScanError != "" {
 			_ = h.Scans.SetError(ctx, rep.ScanID, rep.ScanError)
 		}
 		// Scan completion reaches the server pipeline the same way the
 		// embedded scanner's NATS event does: correlation runs server-side.
+		// The event carries organization_id (resolved from the scan row) so
+		// the correlation subscriber never has to skip hub-reported scans.
 		if rep.ScanState == string(domain.ScanCompleted) && h.Bus != nil {
-			evt, _ := json.Marshal(map[string]any{"scan_id": rep.ScanID, "state": rep.ScanState})
+			orgID := ""
+			if scan, err := h.Scans.ByID(ctx, "", rep.ScanID); err == nil {
+				orgID = scan.OrganizationID
+			}
+			evt, _ := json.Marshal(map[string]any{"scan_id": rep.ScanID, "organization_id": orgID, "state": rep.ScanState})
 			if err := h.Bus.Publish(ctx, "security.scan.result.v1", evt); err != nil {
 				h.Log.Warn("hub: scan result publish failed", "err", err)
 			}
 		}
 	}
 	return nil
+}
+
+// orgForScan resolves the tenant of a scan ("" unknown).
+func (h *Hub) orgForScan(ctx context.Context, scanID string) string {
+	if scanID == "" {
+		return ""
+	}
+	if scan, err := h.Scans.ByID(ctx, "", scanID); err == nil {
+		return scan.OrganizationID
+	}
+	return ""
 }
 
 type GetScanReq struct {

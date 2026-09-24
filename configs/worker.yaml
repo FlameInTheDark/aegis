@@ -5,9 +5,9 @@
 # The worker executes background jobs pulled from NATS JetStream queues and
 # internal schedules:
 #
-#   reports      — report definition -> job -> artifact rendering (spec §50)
-#   detection    — event batch evaluation against detection rules (spec §40)
-#   schedules    — scan schedule firing (CRON) (spec §68)
+# reports — report definition -> job -> artifact rendering
+# detection — event batch evaluation against detection rules
+# schedules — scan schedule firing (CRON)
 #   feed-triggers— feed sync scheduling hand-off to the feed-worker
 #   housekeeping — expired sessions/tokens cleanup, dedup window GC
 #

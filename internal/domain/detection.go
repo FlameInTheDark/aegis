@@ -4,7 +4,7 @@ import (
 	"time"
 )
 
-// Event is the normalized common security event model (spec §22).
+// Event is the normalized common security event model.
 // All Suricata/Zeek/Snort/agent events normalize into this envelope.
 type Event struct {
 	EventID       string         `json:"event_id"`
@@ -42,7 +42,7 @@ type Event struct {
 const EventSchemaVersion = "1"
 
 // DetectionRule is a typed detection rule (internal representation that can
-// also express Sigma-like concepts; spec §40/§41).
+// also express Sigma-like concepts).
 type DetectionRule struct {
 	ID             string            `json:"id"`
 	OrgID          string            `json:"organization_id"`
@@ -99,9 +99,29 @@ type DetectionMatch struct {
 	Count     int            `json:"count"`
 	Timestamp time.Time      `json:"timestamp"`
 	Timeline  map[string]any `json:"timeline,omitempty"`
+	Status    MatchStatus    `json:"status"`
 }
 
-// Baseline is a simple statistical baseline used for anomaly flagging (§189).
+// MatchStatus is the analyst triage state of a detection match.
+type MatchStatus string
+
+const (
+	MatchNew           MatchStatus = "new"
+	MatchInvestigating MatchStatus = "investigating"
+	MatchContained     MatchStatus = "contained"
+	MatchClosed        MatchStatus = "closed"
+)
+
+// ValidMatchStatus reports whether s is a known triage state.
+func ValidMatchStatus(s string) bool {
+	switch MatchStatus(s) {
+	case MatchNew, MatchInvestigating, MatchContained, MatchClosed:
+		return true
+	}
+	return false
+}
+
+// Baseline is a simple statistical baseline used for anomaly flagging.
 type Baseline struct {
 	Entity     string    `json:"entity"` // asset id or ip
 	Metric     string    `json:"metric"` // connections_per_hour|dns_queries|ports|peers
