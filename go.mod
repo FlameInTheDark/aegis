@@ -5,7 +5,6 @@ go 1.27
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.48.0
 	github.com/Masterminds/squirrel v1.5.4
-	github.com/fasthttp/websocket v1.5.8
 	github.com/gofiber/contrib/websocket v1.3.4
 	github.com/gofiber/fiber/v2 v2.52.15
 	github.com/golang-jwt/jwt/v5 v5.3.1
@@ -24,7 +23,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.46.0
 	golang.org/x/crypto v0.57.0
 	golang.org/x/sys v0.48.0
-	google.golang.org/grpc v1.83.2
+	google.golang.org/grpc v1.84.0
 	google.golang.org/protobuf v1.36.12
 )
 
@@ -37,6 +36,7 @@ require (
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/ebitengine/purego v0.10.2 // indirect
+	github.com/fasthttp/websocket v1.5.8 // indirect
 	github.com/go-faster/city v1.0.1 // indirect
 	github.com/go-faster/errors v0.7.1 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
