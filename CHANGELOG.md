@@ -1,3 +1,88 @@
+## [1.33.0] - 2026-09-25
+
+### Added
+- **Suppression lifecycle is now complete.** Suppressions were write-only:
+  `SuppressionRepo.Active` had zero callers, so a suppressed finding kept
+  firing on every scan and was re-created by correlation. Active
+  suppressions are now enforced in the correlator (15s per-org memoized
+  lookups keep sweeps free of N+1 suppression queries), the suppress
+  endpoint derives its scope from the targeted finding record instead of
+  the unused query params the console never sent, the finding moves to
+  `suppressed` status, and the new
+  `GET /findings/suppressions` / `DELETE /findings/suppressions/:id`
+  endpoints expose and revoke the org's suppressions. Table-driven tests
+  pin the matcher.
+- **Asset notes read path.** `POST /assets/:id/notes` accepted
+  `{content}` while the console sent `{note}`, had no permission check,
+  and no route ever listed notes back. The endpoint now requires
+  `asset:write`, accepts both field names, resolves the asset inside the
+  caller's organization, and `GET /assets/:id/notes` returns the notes
+  (org-scoped through the asset and the repo query).
+- `AEGIS_TRUSTED_PROXIES` configuration (comma-separated CIDRs) for
+  reverse-proxy deployments.
+
+### Fixed
+- **Cross-tenant asset write (BOLA).** `PATCH /assets/{id}` and
+  `AssetRepo.Update` filtered only by row id, so any `asset:write` holder
+  could modify another organization's asset by guessing its UUID. The
+  update now carries the `organization_id` predicate and the handler
+  resolves the asset in the caller's org before writing; all internal
+  callers pass the org through.
+- **Cross-tenant sub-resource reads.** `GET /assets/{id}/services`,
+  `/software`, `/findings`, `/interfaces` read raw relations by path id,
+  and `GET /topology/evidence/{edgeID}` had no org check at all. All five
+  now resolve the parent asset/edge within the caller's organization
+  first (evidence joins through `topology_edges`).
+- **X-Forwarded-For spoofing.** Fiber trusted the header globally, letting
+  any client rotate it to bypass the login rate limit and forge audit
+  IPs. XFF is now honored only when the direct peer is in
+  `AEGIS_TRUSTED_PROXIES`. The in-process rate limiter also evicts idle
+  keys instead of growing without bound.
+- **`/readyz` returned 200 during database outages**, keeping Kubernetes
+  routing user traffic to dead pods. It now returns 503 with
+  `status: not_ready`.
+- **Finding dedup identity lost data.** Multiple packages on one asset
+  affected by the same CVE (and distinct non-CVE OSV advisories) collided
+  on the `(asset, cve, service)` key, silently overwriting earlier
+  findings. Migration 0036 rebuilds `idx_findings_dedup` over
+  `(asset, cve, osv, service, software)` after collapsing existing
+  duplicates (newest wins), matching the upsert's conflict target.
+- **Risk explanation hid relief factors.** The factor builder dropped all
+  non-positive contributions, so compensating controls, endpoint-agent
+  visibility and network segmentation lowered the score without ever
+  appearing in `Explain()` or the UI breakdown. Negative contributions
+  are kept, and the explanation cites what offset the score.
+- **Candidate CVE truncation.** `CandidateCVEsByProduct` had no ORDER BY,
+  so products exceeding the 500-row limit (linux, openssl) lost their
+  newest CVEs to heap order. Results are now ordered `cve_id DESC`.
+- **Telemetry ingestion was gated by `event:read`**, letting read-only
+  accounts inject synthetic telemetry. A dedicated `event:write`
+  permission (security_analyst and up) guards `POST /events/ingest` and
+  the per-sensor endpoint.
+- **ClickHouse single-row inserts** during HTTP ingestion accumulated
+  tiny parts and eventually failed with `too many parts`; events of one
+  request are batched into a single insert.
+- **Device-metrics storage stats were cross-tenant.** The settings page
+  (readable by every authenticated user) reported `count()` over the
+  whole `device_metrics` table; the snapshot is now scoped to the
+  caller's tenant.
+- **IPv6 SSH targets never dialed** — `fmt.Sprintf("%s:%d")` produced
+  `2001:db8::1:22`; targets are now joined with `net.JoinHostPort`.
+- **PDF reports mangled Latin-1 text** (`é` rendered as `Ã©`): the
+  WinAnsi writer emitted raw UTF-8 for code points 127-255; it now writes
+  the single octet.
+- **Dead legacy webhook subsystem removed** from routes and the services
+  struct (records it created never fired anything; the alerting
+  destination pipeline supersedes it), together with the import-keeper
+  `var _ =` statements across repository and transport packages.
+- Console: route-level code splitting via `React.lazy` cuts the initial
+  bundle from a 2.5 MB monolith to a ~500 kB shell with per-route chunks;
+  the overview freshness chip is bound to real query data with a manual
+  refresh button instead of a hardcoded "45s ago"; the asset detail
+  loading state no longer shows an alarming red threat shield; the SSH
+  private-key field is a monospace textarea with `.pem` upload and
+  drag-and-drop; the CVE index search is debounced.
+
 ## [1.32.2] - 2026-09-25
 
 ### Fixed

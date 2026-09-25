@@ -60,3 +60,36 @@ func TestSeverityBands(t *testing.T) {
 		t.Fatal("<15 must be informational")
 	}
 }
+
+func TestReliefFactorsAppearInExplanation(t *testing.T) {
+	// Relief used to be subtracted from the score while the factor builder
+	// silently dropped every non-positive point, hiding WHY the score was
+	// reduced from the transparent explanation and the UI breakdown.
+	negative := func(r Result, name string) bool {
+		for _, f := range r.Factors {
+			if f.Name == name && f.Contribution < 0 {
+				return true
+			}
+		}
+		return false
+	}
+	segmented := Evaluate(Inputs{
+		HasCVSS:              true,
+		CVSSScore:            8.0,
+		InternetExposed:      true,
+		Segmented:            true,
+		CompensatingControls: []string{"waf", "allowlist", "segmentation"},
+	}, Default())
+	if !negative(segmented, "compensating_controls") || !negative(segmented, "segmented") {
+		t.Fatalf("relief factors must appear with negative contributions: %+v", segmented.Factors)
+	}
+	// Endpoint-agent relief requires a non-internet-exposed asset by design.
+	endpoint := Evaluate(Inputs{HasCVSS: true, CVSSScore: 8.0, HasEndpointAgent: true}, Default())
+	if !negative(endpoint, "endpoint_visibility") {
+		t.Fatalf("endpoint_visibility relief must appear: %+v", endpoint.Factors)
+	}
+	expl := Explain(segmented)
+	if !strings.Contains(strings.ToLower(expl), "compensating") {
+		t.Fatalf("explanation must cite compensating controls: %s", expl)
+	}
+}

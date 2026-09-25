@@ -15,6 +15,7 @@ import {
   RefreshCw,
   Route,
   ShieldAlert,
+  Loader2,
   Tag,
   Trash2,
   Waypoints,
@@ -128,7 +129,13 @@ export function AssetDetailPage({ id }: { id: string }) {
   }, [query]);
 
   if (bundleQ.isLoading) {
-    return <EmptyState icon={ShieldAlert} title="Loading asset…" />;
+    // Neutral loading signal: the red threat shield used to present a normal
+    // network fetch as a security alarm.
+    return (
+      <p className="flex items-center justify-center gap-2 px-4 py-16 text-sm text-muted-foreground">
+        <Loader2 className="size-4 animate-spin" /> Loading asset…
+      </p>
+    );
   }
   if (!asset || !bundle) {
     return (

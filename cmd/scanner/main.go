@@ -96,7 +96,8 @@ func run() error {
 	correlator := &vulnerabilities.Correlator{
 		Index: pg.NewVulnRepo(db), Findings: pg.NewFindingRepo(db), Evidence: pg.NewEvidenceRepo(db),
 		Assets: assetsRepo, Services: pg.NewServiceRepo(db), Software: pg.NewSoftwareRepo(db), Log: log,
-		Advisories: pg.NewAdvisoryRepo(db),
+		Advisories:   pg.NewAdvisoryRepo(db),
+		Suppressions: pg.NewSuppressionRepo(db),
 	}
 	orch := &scanning.Orchestrator{
 		Scans: pg.NewScanRepo(db), Tasks: pg.NewTaskRepo(db), Observations: pg.NewObservationRepo(db),

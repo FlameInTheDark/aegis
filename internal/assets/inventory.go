@@ -132,7 +132,7 @@ func (s *Service) ProvisionHost(ctx context.Context, orgID, siteID, scanID, ip, 
 	if macVendor != "" && asset.Vendor != "" && asset.Vendor == OUIVendor(mac) {
 		fields["vendor"] = macVendor // upgrade the OUI guess to the real string
 	}
-	if err := s.Assets.Update(ctx, asset.ID, fields); err != nil {
+	if err := s.Assets.Update(ctx, orgID, asset.ID, fields); err != nil {
 		s.Log.Warn("asset enrich failed", "asset", asset.ID, "err", err)
 	}
 	if ip != "" {
@@ -185,7 +185,7 @@ func (s *Service) RecordOS(ctx context.Context, orgID, scanID, siteID, assetID, 
 				s.recordChange(ctx, scanID, siteID, domain.ChangeOSChanged, assetID, "os", cur.OSName, name)
 			}
 		}
-		_ = s.Assets.Update(ctx, assetID, fields)
+		_ = s.Assets.Update(ctx, orgID, assetID, fields)
 	}
 }
 
@@ -212,7 +212,7 @@ func (s *Service) RecordDevice(ctx context.Context, orgID, scanID, siteID, asset
 	if s := source; s != "" {
 		fields["device_type_sources"] = []string{s}
 	}
-	_ = s.Assets.Update(ctx, assetID, fields)
+	_ = s.Assets.Update(ctx, orgID, assetID, fields)
 }
 
 // RecordService upserts an observed service and records change deltas.

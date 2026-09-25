@@ -124,7 +124,7 @@ func (f *fakeAssetStore) Insert(_ context.Context, a *domain.Asset) error {
 	f.inserted = a
 	return nil
 }
-func (f *fakeAssetStore) Update(_ context.Context, _ string, fields map[string]any) error {
+func (f *fakeAssetStore) Update(_ context.Context, _ string, _ string, fields map[string]any) error {
 	f.updates = append(f.updates, fields)
 	return nil
 }

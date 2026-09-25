@@ -236,7 +236,11 @@ func (a *App) handleBulkFindings(c *fiber.Ctx) error {
 	return c.JSON(fiber.Map{"updated": n})
 }
 
-// handleSuppressFinding records a scoped suppression.
+// handleSuppressFinding records a suppression scoped to the targeted
+// finding - scope is derived from the finding record itself, never from
+// query params (the console POSTs only a reason, so every UI suppression
+// used to be stored with NULL vulnerability AND NULL asset and could
+// never match anything) - and moves the finding to suppressed status.
 func (a *App) handleSuppressFinding(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
 	if he := a.requirePerm(c, domain.PermFindingWrite); he != nil {
@@ -249,9 +253,19 @@ func (a *App) handleSuppressFinding(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil || req.Reason == "" {
 		return BadRequest("reason is required for suppressions")
 	}
+	id := c.Params("id")
+	f, err := a.svc.Findings.ByID(Context(c), claims.OrganizationID, id)
+	if err != nil || f == nil {
+		return NotFound("finding not found")
+	}
+	vuln := f.CVEID
+	if vuln == "" {
+		vuln = f.OSVID
+	}
+	assetID := f.AssetID
 	sup := &domain.Suppression{
 		ID: ids.New(), OrgID: claims.OrganizationID,
-		Scope:  domain.SuppressionScope{Vulnerability: strPtr(c.Query("cve")), AssetID: strPtr(c.Query("asset_id"))},
+		Scope:  domain.SuppressionScope{Vulnerability: strPtr(vuln), AssetID: &assetID},
 		Reason: req.Reason, CreatedBy: claims.Subject, CreatedAt: time.Now().UTC(),
 	}
 	if req.ExpiresAt != "" {
@@ -262,8 +276,39 @@ func (a *App) handleSuppressFinding(c *fiber.Ctx) error {
 	if err := a.svc.Suppressions.Insert(Context(c), sup); err != nil {
 		return Internal("suppression insert failed")
 	}
-	a.svc.AuditService.Entry(Context(c), claims.OrganizationID, claims.Subject, "finding.suppressed", "finding:"+c.Params("id"), c.IP(), "", "success", map[string]any{"reason": req.Reason})
+	if err := a.svc.Findings.SetStatus(Context(c), claims.OrganizationID, id, domain.FindingSuppressed, claims.Subject, req.Reason); err != nil {
+		return Internal("could not suppress finding")
+	}
+	a.svc.AuditService.Entry(Context(c), claims.OrganizationID, claims.Subject, "finding.suppressed", "finding:"+id, c.IP(), "", "success", map[string]any{"reason": req.Reason})
 	return c.Status(201).JSON(sup)
+}
+
+// handleListSuppressions lists the organization's active (unexpired)
+// suppressions.
+func (a *App) handleListSuppressions(c *fiber.Ctx) error {
+	claims := a.claimsFrom(c)
+	if he := a.requirePerm(c, domain.PermFindingRead); he != nil {
+		return he
+	}
+	items, err := a.svc.Suppressions.Active(Context(c), claims.OrganizationID)
+	if err != nil {
+		return Internal("suppression list failed")
+	}
+	return c.JSON(fiber.Map{"items": nonNilSlice(items)})
+}
+
+// handleRevokeSuppression deletes a suppression; the finding returns to
+// active on the next correlation pass that re-observes it.
+func (a *App) handleRevokeSuppression(c *fiber.Ctx) error {
+	claims := a.claimsFrom(c)
+	if he := a.requirePerm(c, domain.PermFindingWrite); he != nil {
+		return he
+	}
+	if err := a.svc.Suppressions.Delete(Context(c), claims.OrganizationID, c.Params("id")); err != nil {
+		return NotFound("suppression not found")
+	}
+	a.svc.AuditService.Entry(Context(c), claims.OrganizationID, claims.Subject, "finding.suppression_revoked", "suppression:"+c.Params("id"), c.IP(), "", "success", nil)
+	return c.JSON(fiber.Map{"revoked": true})
 }
 
 func strPtr(s string) *string {

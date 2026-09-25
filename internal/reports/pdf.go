@@ -100,7 +100,11 @@ func pdfEscape(s string) string {
 		case r < 32:
 			b.WriteByte(' ')
 		case r > 126 && r < 256:
-			b.WriteRune(r) // WinAnsi = Latin-1 for these code points
+			// WinAnsi = Latin-1 for 160..255: emit the single octet. Writing
+			// the rune emitted UTF-8 (e.g. é = 0xC3 0xA9), rendering mojibake
+			// in the WinAnsi-encoded PDF stream. 127..159 are C1 controls in
+			// Latin-1 with no safe WinAnsi passthrough - keep the '?'.
+			b.WriteByte(byte(r))
 		case r > 126:
 			b.WriteByte('?')
 		default:

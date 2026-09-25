@@ -17,8 +17,11 @@ type DeviceMetricsStats struct {
 }
 
 // DeviceMetricsStats reports the stored sample count and the age span of
-// the device_metrics table (empty table → zero Rows, nil bounds).
-func (d *DB) DeviceMetricsStats(ctx context.Context) (DeviceMetricsStats, error) {
+// the caller's tenant in device_metrics (empty → zero Rows, nil bounds).
+// The tenant filter is the boundary: the settings page is readable by every
+// authenticated user, and an unscoped count() leaked other tenants' storage
+// footprint and telemetry age.
+func (d *DB) DeviceMetricsStats(ctx context.Context, tenantID string) (DeviceMetricsStats, error) {
 	var s DeviceMetricsStats
 	// Empty-table aggregates are NULL; coalesce them to epoch and map
 	// the sentinel back to nil so callers never see a fake 1970 bound.
@@ -26,7 +29,7 @@ func (d *DB) DeviceMetricsStats(ctx context.Context) (DeviceMetricsStats, error)
 	var oldest, newest string
 	err := d.conn.QueryRow(ctx,
 		`SELECT count(), ifNull(toString(min(timestamp)), ?), ifNull(toString(max(timestamp)), ?)
-                 FROM device_metrics`, epoch, epoch).Scan(&s.Rows, &oldest, &newest)
+                 FROM device_metrics WHERE tenant_id = ?`, epoch, epoch, tenantID).Scan(&s.Rows, &oldest, &newest)
 	if err != nil {
 		return s, fmt.Errorf("clickhouse: device metrics stats: %w", err)
 	}

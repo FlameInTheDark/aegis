@@ -16,6 +16,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { EmptyState, KeyValue, KpiTile, Mono, PageHeader, SeverityBadge, severityMeta, TableFooterBar } from "@/components/shared";
 import { usePageSize } from "@/lib/pagination";
+import { useDebounced } from "@/components/ui";
 import { Tabs, TabsContent, TabsUnderlineList, TabsUnderlineTrigger } from "@/components/ui/tabs";
 import { SearchActions } from "@/components/vulns/SearchActions";
 
@@ -45,10 +46,13 @@ export function VulnerabilitiesPage() {
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSizeRaw] = usePageSize("vulns");
   const [detailId, setDetailId] = React.useState<string | null>(null);
+  // Debounce the server-backed search: the raw input fired a CVE index query
+  // on every keystroke while typing.
+  const debouncedQ = useDebounced(q, 300);
 
   React.useEffect(() => {
     setPage(1);
-  }, [q, sev, source, publishedFrom, publishedTo, kevOnly, sort, sortDir]);
+  }, [debouncedQ, sev, source, publishedFrom, publishedTo, kevOnly, sort, sortDir]);
 
   // a new page size always restarts at page 1 — the old page number has no
   // meaning under a different window
@@ -61,7 +65,7 @@ export function VulnerabilitiesPage() {
   );
 
   const listQ = useVulnerabilities({
-    search: q || undefined,
+    search: debouncedQ || undefined,
     severity: sev,
     source,
     publishedFrom: publishedFrom || undefined,

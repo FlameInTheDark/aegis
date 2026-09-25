@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/FlameInTheDark/aegis/internal/alerting"
@@ -22,6 +23,71 @@ type FindingStore interface {
 // EvidenceStore persists evidence records (implemented by *pg.EvidenceRepo).
 type EvidenceStore interface {
 	Insert(ctx context.Context, e *domain.Evidence) error
+}
+
+// SuppressionSource reads active suppressions (implemented by
+// *pg.SuppressionRepo).
+type SuppressionSource interface {
+	Active(ctx context.Context, orgID string) ([]domain.Suppression, error)
+}
+
+const suppressionCacheTTL = 15 * time.Second
+
+type suppressionCacheEntry struct {
+	at    time.Time
+	items []domain.Suppression
+}
+
+// activeSuppressions returns the org's unexpired suppressions, briefly
+// memoized: sweeps evaluate thousands of candidates and a per-candidate
+// query would be an N+1, while a fully uncached check would re-query per
+// finding. The short TTL bounds how late a new suppression takes effect
+// for not-yet-existing findings; existing rows keep their suppressed
+// status regardless because the upsert only ever reopens resolved ones.
+func (c *Correlator) activeSuppressions(ctx context.Context, orgID string) []domain.Suppression {
+	if c.Suppressions == nil {
+		return nil
+	}
+	c.supMu.Lock()
+	defer c.supMu.Unlock()
+	if c.supCache == nil {
+		c.supCache = map[string]suppressionCacheEntry{}
+	}
+	if e, ok := c.supCache[orgID]; ok && time.Since(e.at) < suppressionCacheTTL {
+		return e.items
+	}
+	items, err := c.Suppressions.Active(ctx, orgID)
+	if err != nil {
+		c.Log.Warn("suppression lookup failed", "org", orgID, "err", err)
+		return nil
+	}
+	c.supCache[orgID] = suppressionCacheEntry{at: time.Now(), items: items}
+	return items
+}
+
+// suppressionMatches reports whether an active suppression covers the
+// finding identity. A suppression matches when the vulnerability it names
+// (CVE or OSV id) and the asset it names both match; a suppression naming
+// neither is site/tag/service-scoped and is not evaluated here.
+func suppressionMatches(items []domain.Suppression, cveID, osvID, assetID string) bool {
+	for _, s := range items {
+		var vuln, asset string
+		if s.Scope.Vulnerability != nil {
+			vuln = *s.Scope.Vulnerability
+		}
+		if s.Scope.AssetID != nil {
+			asset = *s.Scope.AssetID
+		}
+		if vuln == "" && asset == "" {
+			continue
+		}
+		vulnOK := vuln == "" || vuln == cveID || vuln == osvID
+		assetOK := asset == "" || asset == assetID
+		if vulnOK && assetOK {
+			return true
+		}
+	}
+	return false
 }
 
 // Correlator runs the full pipeline :
@@ -47,6 +113,14 @@ type Correlator struct {
 	// DB enables finding.created emission into the alert outbox; nil
 	// disables emission.
 	DB *pg.DB
+	// Suppressions is the optional suppression store; when set, active
+	// suppressions stop matching findings from being created or reopened
+	// during correlation.
+	Suppressions SuppressionSource
+	// supMu/supCache memoize per-org suppression lookups for the cache TTL
+	// so sweeps stay free of per-candidate suppression queries.
+	supMu    sync.Mutex
+	supCache map[string]suppressionCacheEntry
 	// Now is overridable in tests.
 	Now func() time.Time
 }
@@ -338,6 +412,15 @@ func (c *Correlator) upsertFinding(ctx context.Context, orgID string, asset *dom
 	cveID := m.CVEID
 	osvID := m.OSVID
 	title := titleFor(m, vuln)
+
+	// Suppression gate: an active suppression naming this vulnerability
+	// and/or asset stops the finding from being created or reopened.
+	// (SuppressionRepo.Active previously had zero callers - suppressions
+	// were write-only and never enforced.)
+	if suppressionMatches(c.activeSuppressions(ctx, orgID), cveID, osvID, asset.ID) {
+		c.Log.Debug("finding suppressed, skipping upsert", "cve", cveID, "osv", osvID, "asset", asset.ID)
+		return false, nil
+	}
 
 	score, _ := BestSeverity(vuln)
 	var epssVal float64

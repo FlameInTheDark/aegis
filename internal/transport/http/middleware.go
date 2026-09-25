@@ -392,5 +392,3 @@ func (a *App) handleMe(c *fiber.Ctx) error {
 		"permissions":             permStrings,
 	})
 }
-
-var _ = errors.New

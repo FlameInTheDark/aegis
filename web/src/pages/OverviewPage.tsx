@@ -13,7 +13,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { ArrowRight, Bell, Bug, Cpu, DoorOpen, Flame, Layers, ShieldAlert, Siren, Radar } from "lucide-react";
+import { ArrowRight, Bell, Bug, Cpu, DoorOpen, Flame, Layers, RefreshCw, ShieldAlert, Siren, Radar } from "lucide-react";
 
 import { timeAgo } from "@/lib/utils";
 import { Link, useRouter } from "@/lib/router";
@@ -111,9 +111,21 @@ export function OverviewPage() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">Overview</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Security posture for <span className="text-foreground">{site === "all" ? "all sites" : sites.data?.items.find((s) => s.id === site)?.name ?? "site"}</span> · updated{" "}
-            {timeAgo(Date.now() - 45_000)}
+          <p className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground">
+            <span>
+              Security posture for <span className="text-foreground">{site === "all" ? "all sites" : sites.data?.items.find((s) => s.id === site)?.name ?? "site"}</span>
+              {" \u00b7 "}
+              {metrics.dataUpdatedAt ? `updated ${timeAgo(metrics.dataUpdatedAt)}` : "loading\u2026"}
+            </span>
+            <button
+              type="button"
+              aria-label="Refresh overview"
+              title="Refresh"
+              className="inline-flex size-5 items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
+              onClick={() => metrics.refetch()}
+            >
+              <RefreshCw className={metrics.isFetching ? "size-3.5 animate-spin" : "size-3.5"} />
+            </button>
           </p>
         </div>
         <div className="flex items-center gap-2">

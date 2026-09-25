@@ -8,8 +8,8 @@ import type * as A from "@/lib/api-types";
 import { useAssets, type CreateScanInput, useProfiles, useScanners, useSiteNetworks, useSites } from "@/lib/queries";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -388,12 +388,43 @@ export function NewScanDialog({
                           className="h-8 font-mono text-xs"
                         />
                       ) : (
-                        <Input
-                          value={h.key_pem}
-                          onChange={(e) => setSshHosts((l) => l.map((x, j) => (j === i ? { ...x, key_pem: e.target.value } : x)))}
-                          placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
-                          className="h-8 font-mono text-xs"
-                        />
+                        <div className="flex items-start gap-2">
+                          {/* Multi-line PEM input: private keys do not fit a
+                              single-line input, so a monospace textarea plus a
+                              .pem file picker (drag-and-drop friendly). */}
+                          <Textarea
+                            rows={5}
+                            value={h.key_pem}
+                            onChange={(e) => setSshHosts((l) => l.map((x, j) => (j === i ? { ...x, key_pem: e.target.value } : x)))}
+                            onDrop={async (e) => {
+                              const file = e.dataTransfer.files?.[0];
+                              if (file) {
+                                e.preventDefault();
+                                const text = await file.text();
+                                setSshHosts((l) => l.map((x, j) => (j === i ? { ...x, key_pem: text } : x)));
+                              }
+                            }}
+                            placeholder={"-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----"}
+                            spellCheck={false}
+                            className="min-h-0 font-mono text-xs"
+                          />
+                          <label className="flex h-8 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border border-input bg-transparent px-2.5 text-xs font-medium shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground">
+                            Upload .pem
+                            <input
+                              type="file"
+                              accept=".pem,.key,.txt,application/x-pem-file"
+                              className="sr-only"
+                              onChange={async (e) => {
+                                const file = e.target.files?.[0];
+                                if (file) {
+                                  const text = await file.text();
+                                  setSshHosts((l) => l.map((x, j) => (j === i ? { ...x, key_pem: text } : x)));
+                                }
+                                e.target.value = "";
+                              }}
+                            />
+                          </label>
+                        </div>
                       )}
                     </div>
                   </div>

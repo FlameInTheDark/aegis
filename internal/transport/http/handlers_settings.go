@@ -63,7 +63,8 @@ func (a *App) handleGetSettings(c *fiber.Ctx) error {
 		}
 	}
 	if a.svc.CH != nil {
-		if stats, err := a.svc.CH.DeviceMetricsStats(ctx); err == nil {
+		claims := a.claimsFrom(c)
+		if stats, err := a.svc.CH.DeviceMetricsStats(ctx, claims.OrganizationID); err == nil {
 			view.Metrics.Stats = &stats
 		}
 	}

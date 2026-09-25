@@ -88,7 +88,6 @@ type Services struct {
 	Rules        *pg.RuleRepo
 	Matches      *pg.MatchRepo
 	Baselines    *pg.BaselineRepo
-	Webhooks     *pg.WebhookRepo
 	Topology     *pg.TopologyRepo
 	Traces       *pg.TraceRepo
 	Reports      *pg.ReportRepo
@@ -131,6 +130,11 @@ func New(svc *Services) *App {
 		ErrorHandler:          a.errorHandler,
 		DisableStartupMessage: true,
 		ProxyHeader:           "X-Forwarded-For",
+		// Only honor the X-Forwarded-For chain when the direct peer is a
+		// trusted proxy. Globally trusting the header let any client rotate
+		// arbitrary XFF values to bypass rate limits and forge audit IPs.
+		EnableTrustedProxyCheck: true,
+		TrustedProxies:          svc.Cfg.TrustedProxies,
 	}
 	a.fiber = fiber.New(cfg)
 	a.fiber.Use(recover.New(recover.Config{EnableStackTrace: false})) // never expose stacks
@@ -243,6 +247,7 @@ func (a *App) registerRoutes() {
 	g.Get("/assets/:id/traces", a.handleAssetTraces)
 	g.Get("/assets/:id/metrics", a.handleGetAssetMetrics)
 	g.Post("/assets/:id/notes", a.handleAddNote)
+	g.Get("/assets/:id/notes", a.handleListNotes)
 	g.Post("/assets/:id/rediscover", a.handleRediscoverAsset)
 	g.Delete("/assets/:id", a.handleDeleteAsset)
 	g.Get("/services", a.handleListServices)
@@ -279,6 +284,10 @@ func (a *App) registerRoutes() {
 	g.Get("/vulnerabilities/:cveID", a.handleGetVuln)
 	g.Post("/vulnerabilities/correlate", a.handleRunCorrelation)
 	g.Get("/findings", a.handleListFindings)
+	// Static-segment routes must precede /findings/:id so Fiber does not
+	// bind "suppressions" as an id.
+	g.Get("/findings/suppressions", a.handleListSuppressions)
+	g.Delete("/findings/suppressions/:id", a.handleRevokeSuppression)
 	g.Get("/findings/:id", a.handleGetFinding)
 	g.Patch("/findings/:id", a.handleUpdateFinding)
 	g.Post("/findings/bulk", a.handleBulkFindings)
@@ -318,10 +327,6 @@ func (a *App) registerRoutes() {
 	g.Get("/reports/jobs", a.handleListReportJobs)
 	g.Get("/reports/jobs/:id", a.handleGetReportJob)
 	g.Get("/reports/jobs/:id/download", a.handleDownloadReport)
-
-	// Webhooks (alerting).
-	g.Get("/webhooks", a.handleListWebhooks)
-	g.Post("/webhooks", a.handleCreateWebhook)
 
 	// Alerts: occurrences, trigger rules, destinations, engine health.
 	g.Get("/alerts/capabilities", a.handleAlertCapabilities)
@@ -408,6 +413,7 @@ func (a *App) secureHeaders() fiber.Handler {
 func (a *App) rateLimiter(bucket string, limit int, window time.Duration) (fiber.Handler, error) {
 	var mu sync.Mutex
 	local := map[string][]time.Time{}
+	lastSeen := map[string]time.Time{}
 	return func(c *fiber.Ctx) error {
 		key := RateLimitBucket(c, bucket)
 		if a.svc.Redis != nil {
@@ -427,10 +433,23 @@ func (a *App) rateLimiter(bucket string, limit int, window time.Duration) (fiber
 			}
 			if len(fresh) >= limit {
 				local[key] = fresh
+				lastSeen[key] = now
 				mu.Unlock()
 				return RateLimited("rate limit exceeded, slow down")
 			}
 			local[key] = append(fresh, now)
+			lastSeen[key] = now
+			// Idle-key eviction: keys used to live here forever, so every
+			// distinct (or spoofed) client IP grew the map without bound.
+			if len(local) > 8192 {
+				cutoff := now.Add(-4 * window)
+				for k, t := range lastSeen {
+					if t.Before(cutoff) {
+						delete(local, k)
+						delete(lastSeen, k)
+					}
+				}
+			}
 			mu.Unlock()
 		}
 		return c.Next()
@@ -448,10 +467,12 @@ func (a *App) handleReadyz(c *fiber.Ctx) error {
 	critical := map[string]bool{"postgres": true}
 	ready, deps := a.svc.Health.Check(ctx, critical)
 	status := "ready"
+	code := fiber.StatusOK
 	if !ready {
 		status = "not_ready"
+		// Fail closed: a 200 here kept Kubernetes routing user traffic to
+		// pods whose database was gone.
+		code = fiber.StatusServiceUnavailable
 	}
-	return c.Status(fiber.StatusOK).JSON(fiber.Map{"status": status, "dependencies": deps})
+	return c.Status(code).JSON(fiber.Map{"status": status, "dependencies": deps})
 }
-
-var _ = pg.Page{}

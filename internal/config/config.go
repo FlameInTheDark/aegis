@@ -20,13 +20,17 @@ type Config struct {
 	Env     string // development | staging | production
 	Service string // server | worker | scanner | agent | feed-worker
 
-	HTTPAddr     string
-	GRPCAddr     string
-	MetricsAddr  string
-	PublicURL    string
-	LogLevel     string
-	LogFormat    string // console | json
-	WorkerQueues []string
+	HTTPAddr    string
+	GRPCAddr    string
+	MetricsAddr string
+	PublicURL   string
+	// TrustedProxies lists CIDRs (or bare IPs) whose X-Forwarded-For header
+	// is honored for client-IP resolution (rate limiting, audit trail).
+	// Only the direct peer is checked: anything else keeps its socket IP.
+	TrustedProxies []string
+	LogLevel       string
+	LogFormat      string // console | json
+	WorkerQueues   []string
 
 	DatabaseURL   string
 	RedisURL      string
@@ -127,6 +131,13 @@ func Load(service string) (*Config, error) {
 	c.GRPCAddr = get("AEGIS_GRPC_ADDR", ":9090")
 	c.MetricsAddr = get("AEGIS_METRICS_ADDR", ":9100")
 	c.PublicURL = get("AEGIS_PUBLIC_URL", "http://localhost:5173")
+	// Comma-separated list of trusted reverse-proxy CIDRs; empty means the
+	// socket peer is always the client (no XFF trust at all).
+	for _, p := range strings.Split(get("AEGIS_TRUSTED_PROXIES", ""), ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			c.TrustedProxies = append(c.TrustedProxies, p)
+		}
+	}
 	c.LogLevel = get("AEGIS_LOG_LEVEL", "info")
 	c.LogFormat = get("AEGIS_LOG_FORMAT", "console")
 	// Infrastructure URLs and S3 settings accept both the canonical

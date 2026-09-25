@@ -4,11 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/FlameInTheDark/aegis/internal/domain"
-	"github.com/FlameInTheDark/aegis/internal/ids"
-	pg "github.com/FlameInTheDark/aegis/internal/repository/postgres"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -166,35 +163,3 @@ func shortID(id string) string {
 	}
 	return id
 }
-
-// ---------------------------------------------------------------------------
-// Webhooks
-
-func (a *App) handleListWebhooks(c *fiber.Ctx) error {
-	claims := a.claimsFrom(c)
-	items, err := a.svc.Webhooks.List(Context(c), claims.OrganizationID)
-	if err != nil {
-		return Internal("webhook list failed")
-	}
-	return c.JSON(fiber.Map{"items": items})
-}
-
-func (a *App) handleCreateWebhook(c *fiber.Ctx) error {
-	claims := a.claimsFrom(c)
-	if he := a.requirePerm(c, domain.PermSettingsManage); he != nil {
-		return he
-	}
-	var w domain.WebhookConfig
-	if err := c.BodyParser(&w); err != nil || w.URL == "" {
-		return BadRequest("url is required")
-	}
-	w.ID = ids.New()
-	w.OrgID = claims.OrganizationID
-	w.CreatedAt = time.Now().UTC()
-	if err := a.svc.Webhooks.Insert(Context(c), &w); err != nil {
-		return Internal("webhook insert failed")
-	}
-	return c.Status(201).JSON(w)
-}
-
-var _ = pg.Page{}

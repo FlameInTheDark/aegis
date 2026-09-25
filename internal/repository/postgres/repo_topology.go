@@ -108,11 +108,16 @@ func (r *TopologyRepo) Graph(ctx context.Context, orgID, siteID string) ([]domai
 	return nodes, edges, erows.Err()
 }
 
-// EvidenceForEdge returns evidence rows of one edge.
-func (r *TopologyRepo) EvidenceForEdge(ctx context.Context, edgeID string) ([]domain.TopologyEvidence, error) {
-	q := r.db.Select("id, edge_id::text, source, statement, detail, observed_at").
-		From("topology_evidence").Where(squirrel.Eq{"edge_id": edgeID}).
-		OrderBy("observed_at DESC")
+// EvidenceForEdge returns evidence rows of one edge. The join through
+// topology_edges enforces the tenant boundary - evidence rows themselves
+// carry no organization_id, so a bare edge_id lookup leaked any org's raw
+// traceroute probes.
+func (r *TopologyRepo) EvidenceForEdge(ctx context.Context, orgID, edgeID string) ([]domain.TopologyEvidence, error) {
+	q := r.db.Select("te.id, te.edge_id::text, te.source, te.statement, te.detail, te.observed_at").
+		From("topology_evidence te").
+		Join("topology_edges e ON e.id = te.edge_id").
+		Where(squirrel.Eq{"te.edge_id": edgeID, "e.organization_id": orgID}).
+		OrderBy("te.observed_at DESC")
 	rows, err := r.db.Query(ctx, q)
 	if err != nil {
 		return nil, err

@@ -7,19 +7,21 @@ import { GroupsProvider } from "@/lib/groups";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AppShell } from "@/components/layout/AppShell";
-import { OverviewPage } from "@/pages/OverviewPage";
-import { AssetsPage } from "@/pages/AssetsPage";
-import { AssetDetailPage } from "@/pages/AssetDetailPage";
-import { TopologyPage } from "@/pages/TopologyPage";
-import { ScansPage } from "@/pages/ScansPage";
-import { VulnerabilitiesPage } from "@/pages/VulnerabilitiesPage";
-import { FindingsPage } from "@/pages/FindingsPage";
-import { DetectionsPage } from "@/pages/DetectionsPage";
-import { AlertsPage } from "@/pages/AlertsPage";
-import { EventsPage } from "@/pages/EventsPage";
-import { ConnectionsPage } from "@/pages/ConnectionsPage";
-import { ReportsPage } from "@/pages/ReportsPage";
-import { SettingsPage } from "@/pages/SettingsPage";
+// Route-level code splitting: every page (and its charting/D3 dependency)
+// loads in its own chunk on first visit instead of one monolithic bundle.
+const OverviewPage = React.lazy(() => import("@/pages/OverviewPage").then((m) => ({ default: m.OverviewPage })));
+const AssetsPage = React.lazy(() => import("@/pages/AssetsPage").then((m) => ({ default: m.AssetsPage })));
+const AssetDetailPage = React.lazy(() => import("@/pages/AssetDetailPage").then((m) => ({ default: m.AssetDetailPage })));
+const TopologyPage = React.lazy(() => import("@/pages/TopologyPage").then((m) => ({ default: m.TopologyPage })));
+const ScansPage = React.lazy(() => import("@/pages/ScansPage").then((m) => ({ default: m.ScansPage })));
+const VulnerabilitiesPage = React.lazy(() => import("@/pages/VulnerabilitiesPage").then((m) => ({ default: m.VulnerabilitiesPage })));
+const FindingsPage = React.lazy(() => import("@/pages/FindingsPage").then((m) => ({ default: m.FindingsPage })));
+const DetectionsPage = React.lazy(() => import("@/pages/DetectionsPage").then((m) => ({ default: m.DetectionsPage })));
+const AlertsPage = React.lazy(() => import("@/pages/AlertsPage").then((m) => ({ default: m.AlertsPage })));
+const EventsPage = React.lazy(() => import("@/pages/EventsPage").then((m) => ({ default: m.EventsPage })));
+const ConnectionsPage = React.lazy(() => import("@/pages/ConnectionsPage").then((m) => ({ default: m.ConnectionsPage })));
+const ReportsPage = React.lazy(() => import("@/pages/ReportsPage").then((m) => ({ default: m.ReportsPage })));
+const SettingsPage = React.lazy(() => import("@/pages/SettingsPage").then((m) => ({ default: m.SettingsPage })));
 import { LoginPage } from "@/features/auth/LoginPage";
 import { EmptyState } from "@/components/shared";
 import { Button } from "@/components/ui/button";
@@ -97,7 +99,18 @@ function Routes() {
   }
 
   return (
-    <PageErrorBoundary key={key}>{page}</PageErrorBoundary>
+    <PageErrorBoundary key={key}>
+      {/* Chunk loading fallback: lazy pages suspend on first visit. */}
+      <React.Suspense
+        fallback={
+          <div className="flex items-center justify-center px-4 py-24 text-sm text-muted-foreground">
+            <Loader2 className="size-4 animate-spin" />
+          </div>
+        }
+      >
+        {page}
+      </React.Suspense>
+    </PageErrorBoundary>
   );
 }
 

@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/Masterminds/squirrel"
@@ -598,5 +597,3 @@ type Page struct {
 	Action string
 	From   time.Time
 }
-
-var _ = fmt.Sprintf

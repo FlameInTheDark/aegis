@@ -105,7 +105,7 @@ func (r *FindingRepo) Upsert(ctx context.Context, f *domain.Finding) (bool, erro
 		Values(f.ID, f.OrganizationID, f.AssetID, nullPtrID(f.ServiceID), nullPtrID(f.SoftwareID),
 			nullStr(f.CVEID), nullStr(f.OSVID), f.Title, f.MatchType, f.Confidence,
 			f.RiskScore, f.Severity, f.Status, f.Remediation).
-		Suffix(`ON CONFLICT (asset_id, (COALESCE(cve_id, '')), (COALESCE(service_id::text, ''))) DO UPDATE SET
+		Suffix(`ON CONFLICT (asset_id, (COALESCE(cve_id, '')), (COALESCE(osv_id, '')), (COALESCE(service_id::text, '')), (COALESCE(software_id::text, ''))) DO UPDATE SET
                         title = EXCLUDED.title,
                         match_type = EXCLUDED.match_type,
                         -- a match that knows the exact fix (e.g. the advisory
@@ -410,6 +410,16 @@ func (r *SuppressionRepo) Active(ctx context.Context, orgID string) ([]domain.Su
 	return out, rows.Err()
 }
 
+// Delete removes a suppression (revoke). The finding row keeps its
+// suppressed status until re-observation: the upsert only reopens
+// resolved findings, so a revoked suppression takes effect on the next
+// correlation pass that re-observes the finding.
+func (r *SuppressionRepo) Delete(ctx context.Context, orgID, id string) error {
+	q := r.db.Delete("suppressions").Where(squirrel.Eq{"id": id, "organization_id": orgID})
+	_, err := r.db.Exec(ctx, q)
+	return err
+}
+
 // ==================================================================== notes
 
 type NoteRepo struct{ db *DB }
@@ -427,9 +437,12 @@ func (r *NoteRepo) Insert(ctx context.Context, n *domain.Note) error {
 	return err
 }
 
-func (r *NoteRepo) List(ctx context.Context, entity, entityID string) ([]domain.Note, error) {
+// List returns the notes of one entity. The organization_id predicate is the
+// tenant boundary: entity ids are plain UUIDs, so an unscoped lookup could
+// read another organization's notes by guessing the id.
+func (r *NoteRepo) List(ctx context.Context, orgID, entity, entityID string) ([]domain.Note, error) {
 	q := r.db.Select("id, organization_id, entity, entity_id, author_id, author_name, content, created_at").
-		From("notes").Where(squirrel.Eq{"entity": entity, "entity_id": entityID}).
+		From("notes").Where(squirrel.Eq{"organization_id": orgID, "entity": entity, "entity_id": entityID}).
 		OrderBy("created_at DESC")
 	rows, err := r.db.Query(ctx, q)
 	if err != nil {

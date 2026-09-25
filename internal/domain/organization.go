@@ -42,6 +42,7 @@ const (
 	PermFindingWrite    Permission = "finding:write"
 	PermVulnRead        Permission = "vuln:read"
 	PermEventRead       Permission = "event:read"
+	PermEventWrite      Permission = "event:write" // telemetry ingestion
 	PermDetectionManage Permission = "detection:manage"
 	PermReportCreate    Permission = "report:create"
 	PermReportRead      Permission = "report:read"

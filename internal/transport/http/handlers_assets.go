@@ -570,7 +570,12 @@ func (a *App) handleUpdateAsset(c *fiber.Ctx) error {
 	if len(fields) == 0 {
 		return BadRequest("no updatable fields provided")
 	}
-	if err := a.svc.Assets.Update(Context(c), c.Params("id"), fields); err != nil {
+	// Resolve within the caller's organization BEFORE writing: the bare-id
+	// update let any asset:write holder modify another tenant's asset.
+	if _, err := a.svc.Assets.ByID(Context(c), claims.OrganizationID, c.Params("id")); err != nil {
+		return NotFound("asset not found")
+	}
+	if err := a.svc.Assets.Update(Context(c), claims.OrganizationID, c.Params("id"), fields); err != nil {
 		return NotFound("asset not found or update failed")
 	}
 	asset, _ := a.svc.Assets.ByID(Context(c), claims.OrganizationID, c.Params("id"))
@@ -578,7 +583,14 @@ func (a *App) handleUpdateAsset(c *fiber.Ctx) error {
 }
 
 func (a *App) handleAssetServices(c *fiber.Ctx) error {
-	items, err := a.svc.Services.ListForAsset(Context(c), c.Params("id"))
+	claims := a.claimsFrom(c)
+	// Org-scoped resolve first: reading by the raw path id alone returned
+	// any tenant's service inventory (BOLA).
+	asset, err := a.svc.Assets.ByID(Context(c), claims.OrganizationID, c.Params("id"))
+	if err != nil || asset == nil {
+		return NotFound("asset not found")
+	}
+	items, err := a.svc.Services.ListForAsset(Context(c), asset.ID)
 	if err != nil {
 		return NotFound("asset not found")
 	}
@@ -587,7 +599,12 @@ func (a *App) handleAssetServices(c *fiber.Ctx) error {
 }
 
 func (a *App) handleAssetSoftware(c *fiber.Ctx) error {
-	items, err := a.svc.Software.ListForAsset(Context(c), c.Params("id"))
+	claims := a.claimsFrom(c)
+	asset, err := a.svc.Assets.ByID(Context(c), claims.OrganizationID, c.Params("id"))
+	if err != nil || asset == nil {
+		return NotFound("asset not found")
+	}
+	items, err := a.svc.Software.ListForAsset(Context(c), asset.ID)
 	if err != nil {
 		return NotFound("asset not found")
 	}
@@ -595,7 +612,12 @@ func (a *App) handleAssetSoftware(c *fiber.Ctx) error {
 }
 
 func (a *App) handleAssetFindings(c *fiber.Ctx) error {
-	items, err := a.svc.Findings.ListForAsset(Context(c), c.Params("id"))
+	claims := a.claimsFrom(c)
+	asset, err := a.svc.Assets.ByID(Context(c), claims.OrganizationID, c.Params("id"))
+	if err != nil || asset == nil {
+		return NotFound("asset not found")
+	}
+	items, err := a.svc.Findings.ListForAsset(Context(c), asset.ID)
 	if err != nil {
 		return NotFound("asset not found")
 	}
@@ -671,7 +693,12 @@ func (a *App) handleDeleteAsset(c *fiber.Ctx) error {
 }
 
 func (a *App) handleAssetInterfaces(c *fiber.Ctx) error {
-	items, err := a.svc.Ifaces.ListForAsset(Context(c), c.Params("id"))
+	claims := a.claimsFrom(c)
+	asset, err := a.svc.Assets.ByID(Context(c), claims.OrganizationID, c.Params("id"))
+	if err != nil || asset == nil {
+		return NotFound("asset not found")
+	}
+	items, err := a.svc.Ifaces.ListForAsset(Context(c), asset.ID)
 	if err != nil {
 		return NotFound("asset not found")
 	}
@@ -785,7 +812,11 @@ func structToMap(v any) (map[string]any, error) {
 }
 
 func (a *App) handleTopologyEvidence(c *fiber.Ctx) error {
-	items, err := a.svc.Topology.EvidenceForEdge(Context(c), c.Params("edgeID"))
+	claims := a.claimsFrom(c)
+	// Evidence rows carry no organization_id; the repo joins through the
+	// edge so a foreign org's edge id yields nothing instead of leaking
+	// raw traceroute probes across tenants.
+	items, err := a.svc.Topology.EvidenceForEdge(Context(c), claims.OrganizationID, c.Params("edgeID"))
 	if err != nil {
 		return NotFound("edge not found")
 	}

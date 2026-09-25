@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"time"
 
 	"github.com/FlameInTheDark/aegis/internal/observability"
@@ -110,5 +109,3 @@ func (s *ObjectStore) CheckHealth(ctx context.Context) observability.DependencyH
 	}
 	return observability.DependencyHealth{Name: "object_storage", Status: "ok"}
 }
-
-var _ = http.MethodGet

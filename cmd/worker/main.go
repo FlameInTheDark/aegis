@@ -245,6 +245,7 @@ func run() error {
 		Index: pg.NewVulnRepo(db), Findings: pg.NewFindingRepo(db), Evidence: pg.NewEvidenceRepo(db),
 		Assets: pg.NewAssetRepo(db), Services: pg.NewServiceRepo(db), Software: pg.NewSoftwareRepo(db),
 		Log: log, DB: db,
+		Suppressions: pg.NewSuppressionRepo(db),
 	}
 	vulnSearch := &vulnsearch.Service{
 		DB: db, Actions: pg.NewVulnSearchRepo(db), Index: pg.NewVulnRepo(db),

@@ -94,7 +94,7 @@ type DeviceStore interface {
 type AssetStore interface {
 	ByID(ctx context.Context, orgID, id string) (*domain.Asset, error)
 	Insert(ctx context.Context, a *domain.Asset) error
-	Update(ctx context.Context, id string, fields map[string]any) error
+	Update(ctx context.Context, orgID, id string, fields map[string]any) error
 }
 
 // SiteResolver lists an organization's sites; *pg.SiteRepo implements it.
@@ -280,7 +280,7 @@ func (s *Service) LinkInventory(ctx context.Context, agentID string, inv *domain
 		// The abandoned duplicate must not stay behind presenting itself
 		// as a second device: fold its inventory into the adopted asset
 		// and remove it (best-effort — see mergeDuplicate).
-		s.mergeDuplicate(ctx, asset.ID, better.ID)
+		s.mergeDuplicate(ctx, agent.OrganizationID, asset.ID, better.ID)
 		asset = better
 		matched = true
 	}
@@ -318,7 +318,7 @@ func (s *Service) LinkInventory(ctx context.Context, agentID string, inv *domain
 		if inv.Hostname != "" {
 			fields["hostname"] = inv.Hostname
 		}
-		_ = s.Assets.Update(ctx, asset.ID, fields)
+		_ = s.Assets.Update(ctx, agent.OrganizationID, asset.ID, fields)
 	}
 	// Persist agent-reported NICs: MAC, name, MTU and status are
 	// authoritative endpoint data (read from the kernel) and the MAC is
@@ -640,7 +640,7 @@ func (s *Service) singleAddressed(ctx context.Context, agent *domain.Agent, cand
 // Best-effort by design: a failed merge never fails the inventory
 // application — the device stays on the adopted asset, and the duplicate at
 // least loses its endpoint flags so it stops presenting as the live machine.
-func (s *Service) mergeDuplicate(ctx context.Context, orphanID, targetID string) {
+func (s *Service) mergeDuplicate(ctx context.Context, orgID, orphanID, targetID string) {
 	if s.Merger == nil {
 		return
 	}
@@ -648,7 +648,7 @@ func (s *Service) mergeDuplicate(ctx context.Context, orphanID, targetID string)
 		s.Log.Warn("duplicate asset merge failed",
 			"orphan", orphanID, "target", targetID, "err", err)
 		if s.Assets != nil {
-			_ = s.Assets.Update(ctx, orphanID, map[string]any{"has_agent": false, "agent_id": nil})
+			_ = s.Assets.Update(ctx, orgID, orphanID, map[string]any{"has_agent": false, "agent_id": nil})
 		}
 		return
 	}

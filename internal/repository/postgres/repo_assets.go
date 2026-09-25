@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -110,13 +109,16 @@ func (r *AssetRepo) ByID(ctx context.Context, orgID, id string) (*domain.Asset, 
 	return scanAsset(r.db.QueryRow(ctx, q))
 }
 
-func (r *AssetRepo) Update(ctx context.Context, id string, fields map[string]any) error {
+func (r *AssetRepo) Update(ctx context.Context, orgID, id string, fields map[string]any) error {
 	fields["updated_at"] = time.Now().UTC()
 	q := r.db.Update("assets")
 	for k, v := range fields {
 		q = q.Set(k, v)
 	}
-	q = q.Where(squirrel.Eq{"id": id})
+	// The organization_id predicate is the tenant boundary: a bare id
+	// update let any asset:write holder modify another organization's
+	// asset (owner, tags, criticality, overrides) by guessing its UUID.
+	q = q.Where(squirrel.Eq{"id": id, "organization_id": orgID})
 	_, err := r.db.Exec(ctx, q)
 	return err
 }
@@ -709,8 +711,6 @@ func nullStr(s string) any {
 	}
 	return s
 }
-
-var _ = fmt.Sprintf
 
 // ExistsForAsset reports whether a package row already exists for an asset
 // (and returns its id). The agent inventory path uses it to emit

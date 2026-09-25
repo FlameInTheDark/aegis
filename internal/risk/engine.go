@@ -83,7 +83,11 @@ func Evaluate(in Inputs, w Weights) Result {
 	}
 	var r Result
 	add := func(name string, pts float64, format string, args ...any) {
-		if pts <= 0 {
+		// Zero means "no signal, no factor". Negative contributions are
+		// real: compensating controls and segmentation reduce the score and
+		// the explanation must show why, otherwise the transparent factor
+		// breakdown silently hides every score reduction.
+		if pts == 0 {
 			return
 		}
 		r.Factors = append(r.Factors, Factor{Name: name, Contribution: round1(pts), Reason: fmt.Sprintf(format, args...)})
@@ -137,8 +141,9 @@ func Evaluate(in Inputs, w Weights) Result {
 		add("unencrypted", p, "Service transmits cleartext traffic")
 	}
 	if in.Segmented {
-		exposure *= 0.8
-		add("segmented", 0, "Asset is in a segmented network (exposure slightly reduced)")
+		p := exposure * 0.2
+		exposure -= p
+		add("segmented", -p, "Asset is in a segmented network (exposure reduced by %.1f points)", round1(p))
 	}
 	r.EnvironmentalExposure = round1(exposure)
 
@@ -226,6 +231,23 @@ func Explain(r Result) string {
 		if n >= 4 {
 			break
 		}
+	}
+	// Score reductions are part of the explanation too: compensating
+	// controls and segmentation reduce the number the reader sees, so the
+	// paragraph must mention them instead of only citing the raises.
+	var relief []string
+	for _, f := range r.Factors {
+		if f.Contribution < 0 {
+			relief = append(relief, f.Reason)
+		}
+	}
+	switch len(relief) {
+	case 0:
+	case 1:
+		b.WriteString("; offset by " + relief[0])
+	default:
+		b.WriteString("; offset by " + strings.Join(relief[:len(relief)-1], ", ") +
+			" and " + relief[len(relief)-1])
 	}
 	b.WriteString(".")
 	return b.String()

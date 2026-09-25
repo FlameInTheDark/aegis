@@ -332,6 +332,11 @@ func (r *VulnRepo) CandidateCVEsByProduct(ctx context.Context, vendor, product s
 	}
 	q := r.db.Select("DISTINCT cve_id").From("vulnerability_cpe_matches").
 		Where(squirrel.Eq{"vendor": vendor, "product": product}).
+		// Newest first: without a deterministic order PostgreSQL returns
+		// rows in heap order, so for products with more matches than the
+		// limit (linux kernel, openssl, ...) the LIMIT silently truncated
+		// away the most recently published - and most relevant - CVEs.
+		OrderBy("cve_id DESC").
 		Limit(uint64(limit))
 	rows, err := r.db.Query(ctx, q)
 	if err != nil {

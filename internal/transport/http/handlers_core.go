@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/FlameInTheDark/aegis/internal/audit"
 	"github.com/FlameInTheDark/aegis/internal/domain"
 	"github.com/FlameInTheDark/aegis/internal/ids"
 	pg "github.com/FlameInTheDark/aegis/internal/repository/postgres"
@@ -243,24 +242,63 @@ func (a *App) handleSearch(c *fiber.Ctx) error {
 // ---------------------------------------------------------------------------
 // Notes
 
+// handleAddNote records a note on an asset. The note body is accepted as
+// either {"note"} (the console's contract) or {"content"}: the mismatch used
+// to make every UI-saved note fail validation. The endpoint now also requires
+// asset:write and resolves the asset inside the caller's organization before
+// writing - it previously had no permission check and trusted a client-supplied
+// entity type.
 func (a *App) handleAddNote(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
+	if he := a.requirePerm(c, domain.PermAssetWrite); he != nil {
+		return he
+	}
 	var req struct {
 		Entity  string `json:"entity"`
+		Note    string `json:"note"`
 		Content string `json:"content"`
 	}
-	if err := c.BodyParser(&req); err != nil || req.Content == "" {
-		return BadRequest("entity and content are required")
+	if err := c.BodyParser(&req); err != nil {
+		return BadRequest("invalid request body")
+	}
+	content := req.Content
+	if content == "" {
+		content = req.Note
+	}
+	if content == "" {
+		return BadRequest("note content is required")
+	}
+	// Tenant boundary: the asset must exist in the caller's organization.
+	if _, err := a.svc.Assets.ByID(Context(c), claims.OrganizationID, c.Params("id")); err != nil {
+		return NotFound("asset not found")
 	}
 	n := &domain.Note{
-		ID: ids.New(), OrgID: claims.OrganizationID, Entity: req.Entity,
+		ID: ids.New(), OrgID: claims.OrganizationID, Entity: "asset",
 		EntityID: c.Params("id"), AuthorID: claims.Subject,
-		AuthorName: a.authorName(c), Content: req.Content, CreatedAt: time.Now().UTC(),
+		AuthorName: a.authorName(c), Content: content, CreatedAt: time.Now().UTC(),
 	}
 	if err := a.svc.Notes.Insert(Context(c), n); err != nil {
 		return Internal("note insert failed")
 	}
 	return c.Status(201).JSON(n)
+}
+
+// handleListNotes returns an asset's notes, newest first. The read path was
+// never exposed before, so notes written through the API were invisible in
+// the console; the listing is org-scoped via the asset resolution.
+func (a *App) handleListNotes(c *fiber.Ctx) error {
+	claims := a.claimsFrom(c)
+	if he := a.requirePerm(c, domain.PermAssetRead); he != nil {
+		return he
+	}
+	if _, err := a.svc.Assets.ByID(Context(c), claims.OrganizationID, c.Params("id")); err != nil {
+		return NotFound("asset not found")
+	}
+	items, err := a.svc.Notes.List(Context(c), claims.OrganizationID, "asset", c.Params("id"))
+	if err != nil {
+		return Internal("note list failed")
+	}
+	return c.JSON(fiber.Map{"items": nonNilSlice(items)})
 }
 
 // ---------------------------------------------------------------------------
@@ -428,5 +466,3 @@ func (a *App) handleAuditLog(c *fiber.Ctx) error {
 	}
 	return c.JSON(fiber.Map{"items": entries, "total": total, "page": page, "limit": limit})
 }
-
-var _ = audit.ActionLogin

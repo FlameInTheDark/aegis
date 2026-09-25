@@ -179,13 +179,20 @@ func (in *Ingestor) HTTPIngest(ctx context.Context, se SubjectEvent) (int, error
 		return 0, err
 	}
 	accepted := 0
+	batch := make([]domain.Event, 0, len(evs))
 	for _, ev := range evs {
 		first, err := in.Cache.DedupCheck(ctx, "evt:"+ev.EventID, 10*time.Minute)
 		if err == nil && !first {
 			continue // duplicate within window
 		}
-		_ = in.CH.InsertEvents(ctx, []domain.Event{ev})
+		batch = append(batch, ev)
 		accepted++
+	}
+	// One insert per request, not per event: row-at-a-time inserts make
+	// ClickHouse accumulate thousands of tiny parts and eventually reject
+	// ingestion with "too many parts".
+	if len(batch) > 0 {
+		_ = in.CH.InsertEvents(ctx, batch)
 	}
 	if in.Engine != nil && len(evs) > 0 {
 		_, _ = in.Engine.Ingest(ctx, se.TenantID, evs)

@@ -162,8 +162,9 @@ func run() error {
 	correlator := &vulnerabilities.Correlator{
 		Index: vulnRepo, Findings: pg.NewFindingRepo(db), Evidence: pg.NewEvidenceRepo(db),
 		Assets: assetsRepo, Services: servicesRepo, Software: softwareRepo, Log: log,
-		Advisories: pg.NewAdvisoryRepo(db),
-		DB:         db,
+		Advisories:   pg.NewAdvisoryRepo(db),
+		Suppressions: pg.NewSuppressionRepo(db),
+		DB:           db,
 	}
 	scanRepo, taskRepo, scannerRepo := pg.NewScanRepo(db), pg.NewTaskRepo(db), pg.NewScannerRepo(db)
 	topoRepo := pg.NewTopologyRepo(db)
@@ -274,7 +275,6 @@ func run() error {
 		Findings: pg.NewFindingRepo(db), Evidence: pg.NewEvidenceRepo(db),
 		Suppressions: pg.NewSuppressionRepo(db), Notes: pg.NewNoteRepo(db),
 		Rules: pg.NewRuleRepo(db), Matches: pg.NewMatchRepo(db), Baselines: pg.NewBaselineRepo(db),
-		Webhooks: pg.NewWebhookRepo(db),
 		Topology: topoRepo, Traces: traceRepo, Reports: pg.NewReportRepo(db),
 		Groups:  pg.NewGroupRepo(db),
 		JobLogs: jobLogStore, WSHub: jobLogHub,

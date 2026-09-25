@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -294,11 +295,13 @@ func (c *SSHClient) Run(ctx context.Context, host SSHHostConfig, cmd string) (st
 		Timeout:         timeout,
 	}
 	dialer := &net.Dialer{Timeout: timeout}
-	conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", host.Host, port))
+	// net.JoinHostPort brackets IPv6 literals correctly; Sprintf produced
+	// 2001:db8::1:22 and every IPv6 SSH target failed to parse.
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(host.Host, strconv.Itoa(port)))
 	if err != nil {
 		return "", fmt.Errorf("ssh dial %s: %w", host.Host, err)
 	}
-	sconn, chans, reqs, err := ssh.NewClientConn(conn, fmt.Sprintf("%s:%d", host.Host, port), cfg)
+	sconn, chans, reqs, err := ssh.NewClientConn(conn, net.JoinHostPort(host.Host, strconv.Itoa(port)), cfg)
 	if err != nil {
 		_ = conn.Close()
 		return "", fmt.Errorf("ssh handshake %s: %w", host.Host, err)

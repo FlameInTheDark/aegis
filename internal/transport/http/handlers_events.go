@@ -194,7 +194,10 @@ func splitCursor(cur string) []string {
 // handleIngestEvent accepts a sensor/agent push with dedup and caps.
 func (a *App) handleIngestEvent(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
-	if he := a.requirePerm(c, domain.PermEventRead); he != nil {
+	// Ingestion is a WRITE: gating it behind event:read let any read-only
+	// account (or viewer token) inject synthetic telemetry into detections,
+	// alert triggers and audit trails.
+	if he := a.requirePerm(c, domain.PermEventWrite); he != nil {
 		return he
 	}
 	var req telemetry.SubjectEvent
@@ -215,7 +218,8 @@ func (a *App) handleIngestEvent(c *fiber.Ctx) error {
 // handleSensorIngest is the per-sensor endpoint (same semantics as ingest).
 func (a *App) handleSensorIngest(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
-	if he := a.requirePerm(c, domain.PermEventRead); he != nil {
+	// Same write-permission rule as the generic ingest endpoint.
+	if he := a.requirePerm(c, domain.PermEventWrite); he != nil {
 		return he
 	}
 	var raw json.RawMessage
@@ -237,5 +241,3 @@ func (a *App) handleSensorIngest(c *fiber.Ctx) error {
 	}
 	return c.Status(202).JSON(fiber.Map{"accepted": accepted})
 }
-
-var _ = pg.Page{}
