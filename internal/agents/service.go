@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FlameInTheDark/aegis/internal/alerting"
 	"github.com/FlameInTheDark/aegis/internal/connectors"
 	"github.com/FlameInTheDark/aegis/internal/domain"
 	"github.com/FlameInTheDark/aegis/internal/ids"
@@ -47,7 +48,13 @@ type Service struct {
 	// IPStale bounds how long an address observation keeps resolving to an
 	// asset during inventory matching (same semantics as assets.Service).
 	IPStale time.Duration
-	Log     *slog.Logger
+	// Software persists agent-reported packages (endpoint software
+	// inventory); nil keeps the legacy behavior of dropping them.
+	Software *pg.SoftwareRepo
+	// DB enables domain-event emission into the alert outbox (asset
+	// discovered, software installed); nil disables emission.
+	DB  *pg.DB
+	Log *slog.Logger
 }
 
 // AssetMerger folds a duplicate asset into the canonical one and removes it;
@@ -61,7 +68,7 @@ type AssetMerger interface {
 // on the linked asset; *pg.IdentifierRepo implements it.
 type IdentifierStore interface {
 	Upsert(ctx context.Context, assetID, typ, value string, weight float64) error
-	FindByIdentifier(ctx context.Context, typ, value string) ([]string, error)
+	FindByIdentifier(ctx context.Context, orgID, typ, value string) ([]string, error)
 }
 
 // DeviceStore is the persistence surface the device lifecycle needs;
@@ -293,6 +300,11 @@ func (s *Service) LinkInventory(ctx context.Context, agentID string, inv *domain
 			return err
 		}
 		_ = s.Repo.LinkAsset(ctx, agentID, asset.ID)
+		if s.DB != nil {
+			// New device joined via the endpoint path — the device.bound
+			// event fires separately from BindDevice.
+			_ = alerting.EmitAssetDiscovered(ctx, s.DB, agent.OrganizationID, agent.SiteID, asset.ID, inv.Hostname, "agent", string(asset.DeviceType))
+		}
 	} else {
 		if matched {
 			_ = s.Repo.LinkAsset(ctx, agentID, asset.ID)
@@ -317,7 +329,33 @@ func (s *Service) LinkInventory(ctx context.Context, agentID string, inv *domain
 	// serial, MACs, hostname, addresses) so the next scan or inventory
 	// converges on the same asset instead of creating a copy.
 	s.persistIdentifiers(ctx, asset.ID, inv)
+	s.persistSoftware(ctx, agent.OrganizationID, agent.SiteID, asset.ID, sw)
 	return nil
+}
+
+// persistSoftware applies agent-reported packages to the software
+// inventory and emits software.installed for genuinely new rows.
+func (s *Service) persistSoftware(ctx context.Context, orgID, siteID, assetID string, sw []domain.Software) {
+	if s.Software == nil || len(sw) == 0 {
+		return
+	}
+	for i := range sw {
+		pkg := sw[i]
+		exists, _, err := s.Software.ExistsForAsset(ctx, assetID, pkg.Name, pkg.Version, pkg.Ecosystem)
+		if err != nil {
+			s.Log.Warn("software existence check failed", "asset", assetID, "err", err)
+		}
+		pkg.AssetID = assetID
+		pkg.Source = string(domain.SourceAgent)
+		pkg.LastSeen = time.Now().UTC()
+		if err := s.Software.Upsert(ctx, &pkg); err != nil {
+			s.Log.Warn("software upsert failed", "asset", assetID, "name", pkg.Name, "err", err)
+			continue
+		}
+		if !exists && s.DB != nil {
+			_ = alerting.EmitSoftwareInstalled(ctx, s.DB, orgID, siteID, assetID, pkg.ID, pkg.Name, pkg.Version, pkg.Ecosystem)
+		}
+	}
 }
 
 // matchAsset resolves an inventory to an existing asset of the device's
@@ -345,7 +383,7 @@ func (s *Service) matchAsset(ctx context.Context, agent *domain.Agent, inv *doma
 	add("hostname", inv.Hostname)
 	add("fqdn", inv.FQDN)
 	for _, p := range pairs {
-		ids, err := s.Ident.FindByIdentifier(ctx, p.typ, p.val)
+		ids, err := s.Ident.FindByIdentifier(ctx, agent.OrganizationID, p.typ, p.val)
 		if err != nil || len(ids) == 0 {
 			continue
 		}
@@ -363,7 +401,7 @@ func (s *Service) matchAsset(ctx context.Context, agent *domain.Agent, inv *doma
 	// Address fallback within the device's site.
 	var best *domain.Asset
 	for _, ip := range reportedAddresses(inv) {
-		candidates, err := s.Ident.FindByIdentifier(ctx, "ip", ip)
+		candidates, err := s.Ident.FindByIdentifier(ctx, agent.OrganizationID, "ip", ip)
 		if err != nil {
 			continue
 		}
@@ -411,7 +449,7 @@ func (s *Service) relinkAsset(ctx context.Context, agent *domain.Agent, inv *dom
 	}
 	addrs := reportedAddresses(inv)
 	for _, ip := range addrs {
-		ids, err := s.Ident.FindByIdentifier(ctx, "ip", ip)
+		ids, err := s.Ident.FindByIdentifier(ctx, agent.OrganizationID, "ip", ip)
 		if err != nil {
 			continue
 		}
@@ -460,7 +498,7 @@ func relinkNames(inv *domain.SystemInventory) []string {
 func (s *Service) assetsByMACs(ctx context.Context, agent *domain.Agent, linked *domain.Asset, macs []string) []*domain.Asset {
 	var out []*domain.Asset
 	for _, mac := range macs {
-		ids, err := s.Ident.FindByIdentifier(ctx, "mac", mac)
+		ids, err := s.Ident.FindByIdentifier(ctx, agent.OrganizationID, "mac", mac)
 		if err != nil {
 			continue
 		}
@@ -487,11 +525,11 @@ func (s *Service) assetsByNames(ctx context.Context, agent *domain.Agent, linked
 	var out []*domain.Asset
 	seen := map[string]bool{}
 	for _, name := range names {
-		ids, err := s.Ident.FindByIdentifier(ctx, "hostname", name)
+		ids, err := s.Ident.FindByIdentifier(ctx, agent.OrganizationID, "hostname", name)
 		if err != nil {
 			continue
 		}
-		fqdns, err := s.Ident.FindByIdentifier(ctx, "fqdn", name)
+		fqdns, err := s.Ident.FindByIdentifier(ctx, agent.OrganizationID, "fqdn", name)
 		if err == nil {
 			ids = append(ids, fqdns...)
 		}
@@ -517,7 +555,7 @@ func (s *Service) assetsByAddresses(ctx context.Context, agent *domain.Agent, li
 	var out []*domain.Asset
 	seen := map[string]bool{}
 	for _, ip := range addrs {
-		ids, err := s.Ident.FindByIdentifier(ctx, "ip", ip)
+		ids, err := s.Ident.FindByIdentifier(ctx, agent.OrganizationID, "ip", ip)
 		if err != nil {
 			continue
 		}
@@ -543,7 +581,7 @@ func (s *Service) assetsByAddresses(ctx context.Context, agent *domain.Agent, li
 func (s *Service) oldestAddressed(ctx context.Context, agent *domain.Agent, candidates []*domain.Asset, addrs []string) *domain.Asset {
 	var best *domain.Asset
 	for _, a := range candidates {
-		if !assetHoldsAddress(ctx, s.Ident, a.ID, addrs) {
+		if !assetHoldsAddress(ctx, s.Ident, agent.OrganizationID, a.ID, addrs) {
 			continue
 		}
 		claims, err := s.Repo.AgentIDsForAsset(ctx, a.ID)
@@ -575,7 +613,7 @@ func (s *Service) oldestAddressed(ctx context.Context, agent *domain.Agent, cand
 func (s *Service) singleAddressed(ctx context.Context, agent *domain.Agent, candidates []*domain.Asset, addrs []string) *domain.Asset {
 	var only *domain.Asset
 	for _, a := range candidates {
-		if !assetHoldsAddress(ctx, s.Ident, a.ID, addrs) {
+		if !assetHoldsAddress(ctx, s.Ident, agent.OrganizationID, a.ID, addrs) {
 			continue
 		}
 		if only != nil {
@@ -620,9 +658,9 @@ func (s *Service) mergeDuplicate(ctx context.Context, orphanID, targetID string)
 
 // assetHoldsAddress reports whether any of the addresses is already
 // recorded as an ip identifier of the asset.
-func assetHoldsAddress(ctx context.Context, ident IdentifierStore, assetID string, addrs []string) bool {
+func assetHoldsAddress(ctx context.Context, ident IdentifierStore, orgID, assetID string, addrs []string) bool {
 	for _, ip := range addrs {
-		ids, err := ident.FindByIdentifier(ctx, "ip", ip)
+		ids, err := ident.FindByIdentifier(ctx, orgID, "ip", ip)
 		if err != nil {
 			continue
 		}

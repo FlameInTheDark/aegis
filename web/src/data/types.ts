@@ -207,6 +207,9 @@ export interface Finding {
   firstSeen: string;
   lastSeen: string;
   assignee?: string;
+  /** inventory identity of the matched software/service (server-resolved) */
+  product?: string;
+  version?: string;
 }
 
 export type ScanState = "queued" | "running" | "completed" | "failed" | "cancelled";

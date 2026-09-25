@@ -93,7 +93,7 @@ func TestIntegrationAssetDelete(t *testing.T) {
 		Name: "ghost-app", Version: "1.0", Ecosystem: "os_linux", FirstSeen: now, LastSeen: now}); err != nil {
 		t.Fatalf("software: %v", err)
 	}
-	if err := NewFindingRepo(db).Upsert(ctx, &domain.Finding{ID: ids.New(), OrganizationID: org.ID, AssetID: victim.ID,
+	if _, err := NewFindingRepo(db).Upsert(ctx, &domain.Finding{ID: ids.New(), OrganizationID: org.ID, AssetID: victim.ID,
 		ServiceID: &victimSvc.ID, CVEID: "CVE-2026-0001", Title: "Ghost service vulnerable",
 		MatchType: domain.MatchServiceVersion, Confidence: 0.8, RiskScore: 7.5,
 		Severity: domain.SeverityHigh, Status: domain.FindingOpen, FirstSeen: now, LastSeen: now}); err != nil {
@@ -141,7 +141,7 @@ func TestIntegrationAssetDelete(t *testing.T) {
 	}
 
 	// Identifiers cascaded: the address no longer resolves to any asset.
-	holders, err := ident.FindByIdentifier(ctx, "ip", "10.9.9.9")
+	holders, err := ident.FindByIdentifier(ctx, org.ID, "ip", "10.9.9.9")
 	if err != nil {
 		t.Fatalf("find identifier: %v", err)
 	}

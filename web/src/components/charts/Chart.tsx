@@ -16,10 +16,17 @@ const base = {
 
 type ChartSelectParams = { componentType?: string; dataType?: string; data?: unknown }
 
-export function Chart({ option, height = 260, loading, onSelect, onDataZoom }: {
+export function Chart({ option, height = 260, loading, live, onSelect, onDataZoom }: {
   option: echarts.EChartsOption
   height?: number
   loading?: boolean
+  // live marks continuously-polling charts (metric tails). ECharts animation
+  // is disabled entirely: with it on, every poll morphs each point from its
+  // old value to the new one — the line seems to be reshaped in place — and
+  // a replaced category axis replays the entry sweep, so the window never
+  // reads as “moving left”. With animation off the refreshed window snaps
+  // into its new position and the newest sample simply pushes the line left.
+  live?: boolean
   // onSelect receives clicked elements' params (graph nodes, pie slices…).
   // Undefined marks are harmless — pages filter on what they know.
   onSelect?: (params: ChartSelectParams) => void
@@ -36,6 +43,9 @@ export function Chart({ option, height = 260, loading, onSelect, onDataZoom }: {
   onSelectRef.current = onSelect
   const onDataZoomRef = useRef(onDataZoom)
   onDataZoomRef.current = onDataZoom
+  // Polling charts must not animate; see the live prop comment above.
+  const withLive = (o: echarts.EChartsOption): echarts.EChartsOption =>
+    live ? { ...o, animation: false } : o
 
   // The chart instance lives as long as the host div does: it is created
   // once when the div enters the DOM and disposed when it leaves (loading
@@ -46,7 +56,7 @@ export function Chart({ option, height = 260, loading, onSelect, onDataZoom }: {
     if (loading || !ref.current) return
     const chart = echarts.init(ref.current, undefined, { renderer: 'canvas' })
     chartRef.current = chart
-    chart.setOption({ ...base, ...optionRef.current })
+    chart.setOption(withLive({ ...base, ...optionRef.current }))
     const onResize = () => chart.resize()
     window.addEventListener('resize', onResize)
     const onClick = (params: echarts.ECElementEvent) => onSelectRef.current?.(params as ChartSelectParams)
@@ -73,10 +83,11 @@ export function Chart({ option, height = 260, loading, onSelect, onDataZoom }: {
   }, [loading])
 
   // Data updates merge into the live instance — ECharts transitions the
-  // series between the old and new data instead of redrawing from scratch.
+  // series between the old and new data instead of redrawing from scratch
+  // (unless the chart is marked live, which updates instantly).
   useEffect(() => {
-    chartRef.current?.setOption({ ...base, ...option })
-  }, [option])
+    chartRef.current?.setOption(withLive({ ...base, ...option }))
+  }, [option, live])
 
   return (
     <div>

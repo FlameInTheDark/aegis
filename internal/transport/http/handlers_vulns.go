@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/FlameInTheDark/aegis/internal/alerting"
 	"github.com/FlameInTheDark/aegis/internal/auth"
 	"github.com/FlameInTheDark/aegis/internal/domain"
 	"github.com/FlameInTheDark/aegis/internal/feeds"
@@ -182,8 +183,15 @@ func (a *App) handleUpdateFinding(c *fiber.Ctx) error {
 	if !valid[status] {
 		return BadRequest("invalid status")
 	}
+	// Capture the pre-transition state for the domain event (the audit
+	// trail records the outcome; the event drives alert triggers).
+	before, _ := a.svc.Findings.ByID(Context(c), claims.OrganizationID, c.Params("id"))
 	if err := a.svc.Findings.SetStatus(Context(c), claims.OrganizationID, c.Params("id"), status, claims.Subject, req.Reason); err != nil {
 		return NotFound("finding not found or status change failed")
+	}
+	if before != nil && a.svc.DB != nil {
+		_ = alerting.EmitFindingStatusChanged(Context(c), a.svc.DB, claims.OrganizationID,
+			"", before.AssetID, before.ID, string(before.Status), string(status), claims.Subject)
 	}
 	a.svc.AuditService.Entry(Context(c), claims.OrganizationID, claims.Subject, "finding.status_changed", "finding:"+c.Params("id"), c.IP(), "", "success",
 		map[string]any{"to": string(status), "reason": req.Reason})

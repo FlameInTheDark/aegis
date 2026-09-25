@@ -30,6 +30,16 @@ func (f *fakeIndex) CVE(ctx context.Context, id string) (*domain.Vulnerability, 
 	return f.cves[id], nil
 }
 
+func (f *fakeIndex) CVEs(ctx context.Context, ids []string) (map[string]*domain.Vulnerability, error) {
+	out := make(map[string]*domain.Vulnerability, len(ids))
+	for _, id := range ids {
+		if v := f.cves[id]; v != nil {
+			out[id] = v
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeIndex) EPSSForCVEs(ctx context.Context, ids []string) (map[string]float64, error) {
 	return map[string]float64{}, nil
 }
@@ -69,7 +79,7 @@ func testIndex() *fakeIndex {
 
 func TestMatchExactCPE(t *testing.T) {
 	m := &Matcher{Index: testIndex()}
-	matches, err := m.Match(context.Background(), MatchInput{Vendor: "nginx", Product: "nginx", Version: "1.24.0"})
+	matches, _, err := m.Match(context.Background(), MatchInput{Vendor: "nginx", Product: "nginx", Version: "1.24.0"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,12 +93,12 @@ func TestMatchExactCPE(t *testing.T) {
 
 func TestMatchCPERange(t *testing.T) {
 	m := &Matcher{Index: testIndex()}
-	matches, _ := m.Match(context.Background(), MatchInput{Vendor: "apache", Product: "httpd", Version: "2.4.49"})
+	matches, _, _ := m.Match(context.Background(), MatchInput{Vendor: "apache", Product: "httpd", Version: "2.4.49"})
 	if len(matches) != 1 || matches[0].MatchType != domain.MatchCPERange {
 		t.Fatalf("want CPE_RANGE for 2.4.49, got %+v", matches)
 	}
 	// 2.4.51 is outside the range: no match.
-	matches, _ = m.Match(context.Background(), MatchInput{Vendor: "apache", Product: "httpd", Version: "2.4.51"})
+	matches, _, _ = m.Match(context.Background(), MatchInput{Vendor: "apache", Product: "httpd", Version: "2.4.51"})
 	if len(matches) != 0 {
 		t.Fatalf("2.4.51 must not match, got %+v", matches)
 	}
@@ -96,7 +106,7 @@ func TestMatchCPERange(t *testing.T) {
 
 func TestMatchUnknownVersionIsHeuristic(t *testing.T) {
 	m := &Matcher{Index: testIndex()}
-	matches, _ := m.Match(context.Background(), MatchInput{Vendor: "apache", Product: "httpd"})
+	matches, _, _ := m.Match(context.Background(), MatchInput{Vendor: "apache", Product: "httpd"})
 	if len(matches) != 1 || matches[0].MatchType != domain.MatchHeuristic {
 		t.Fatalf("version-unknown must be heuristic (potential), got %+v", matches)
 	}
@@ -107,7 +117,7 @@ func TestMatchUnknownVersionIsHeuristic(t *testing.T) {
 
 func TestRejectedCVEsNeverMatch(t *testing.T) {
 	m := &Matcher{Index: testIndex()}
-	matches, _ := m.Match(context.Background(), MatchInput{Vendor: "nginx", Product: "nginx", Version: "1.21.0"})
+	matches, _, _ := m.Match(context.Background(), MatchInput{Vendor: "nginx", Product: "nginx", Version: "1.21.0"})
 	for _, match := range matches {
 		if match.CVEID == "CVE-2099-0001" {
 			t.Fatal("rejected CVE must be excluded")
@@ -117,12 +127,12 @@ func TestRejectedCVEsNeverMatch(t *testing.T) {
 
 func TestPackageMatchingOSV(t *testing.T) {
 	m := &Matcher{Index: testIndex()}
-	matches, _ := m.Match(context.Background(), MatchInput{Ecosystem: "go", PackageName: "github.com/example/app", Version: "1.1.0"})
+	matches, _, _ := m.Match(context.Background(), MatchInput{Ecosystem: "go", PackageName: "github.com/example/app", Version: "1.1.0"})
 	if len(matches) != 1 || matches[0].CVEID != "CVE-2026-0001" || matches[0].OSVID != "OSV-2026-0001" {
 		t.Fatalf("want OSV package match, got %+v", matches)
 	}
 	// Fixed version: no match.
-	matches, _ = m.Match(context.Background(), MatchInput{Ecosystem: "go", PackageName: "github.com/example/app", Version: "1.2.3"})
+	matches, _, _ = m.Match(context.Background(), MatchInput{Ecosystem: "go", PackageName: "github.com/example/app", Version: "1.2.3"})
 	if len(matches) != 0 {
 		t.Fatalf("fixed version must not match, got %+v", matches)
 	}
@@ -130,7 +140,7 @@ func TestPackageMatchingOSV(t *testing.T) {
 
 func TestPackageVersionUnknownStaysPotential(t *testing.T) {
 	m := &Matcher{Index: testIndex()}
-	matches, _ := m.Match(context.Background(), MatchInput{Ecosystem: "npm", PackageName: "left-pad"})
+	matches, _, _ := m.Match(context.Background(), MatchInput{Ecosystem: "npm", PackageName: "left-pad"})
 	if len(matches) != 1 || matches[0].MatchType != domain.MatchHeuristic {
 		t.Fatalf("advisory without ranges must stay potential, got %+v", matches)
 	}
@@ -164,7 +174,7 @@ func TestMatchUserCaseOpenSSH(t *testing.T) {
 			}}},
 	}}
 	m := &Matcher{Index: idx}
-	matches, err := m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: "10.0p2 Debian 7"})
+	matches, _, err := m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: "10.0p2 Debian 7"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,13 +186,13 @@ func TestMatchUserCaseOpenSSH(t *testing.T) {
 	}
 
 	// Fixed release: outside the range — and no potential downgrade.
-	matches, _ = m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: "10.4p1 Debian 3"})
+	matches, _, _ = m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: "10.4p1 Debian 3"})
 	if len(matches) != 0 {
 		t.Fatalf("10.4p1 is fixed and must not match in any form, got %+v", matches)
 	}
 
 	// Unknown version stays a low-confidence potential (honest).
-	matches, _ = m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH"})
+	matches, _, _ = m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH"})
 	if len(matches) != 1 || matches[0].MatchType != domain.MatchHeuristic {
 		t.Fatalf("unknown version must stay heuristic potential, got %+v", matches)
 	}
@@ -199,12 +209,12 @@ func TestMatchExactPinWithBannerNoise(t *testing.T) {
 			}}},
 	}}
 	m := &Matcher{Index: idx}
-	matches, _ := m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: "10.0p2 Debian 7"})
+	matches, _, _ := m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: "10.0p2 Debian 7"})
 	if len(matches) != 1 || matches[0].MatchType != domain.MatchExactCPE {
 		t.Fatalf("pinned version must match despite banner noise, got %+v", matches)
 	}
 	// A different patch level is not the pinned version.
-	matches, _ = m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: "10.0p1 Debian 7"})
+	matches, _, _ = m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: "10.0p1 Debian 7"})
 	if len(matches) != 0 {
 		t.Fatalf("10.0p1 must not match pin 10.0p2, got %+v", matches)
 	}
@@ -222,7 +232,7 @@ func TestRangeMissBlocksPotential(t *testing.T) {
 			}}},
 	}}
 	m := &Matcher{Index: idx}
-	matches, _ := m.Match(context.Background(), MatchInput{Vendor: "v", Product: "p", Version: "3.0"})
+	matches, _, _ := m.Match(context.Background(), MatchInput{Vendor: "v", Product: "p", Version: "3.0"})
 	if len(matches) != 0 {
 		t.Fatalf("3.0 is outside [0,2.0): no match of any kind, got %+v", matches)
 	}

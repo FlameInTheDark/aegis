@@ -169,16 +169,15 @@ func newFakeFn(t *testing.T, fn string) *fakeFnRole {
 func hybridWithFakes(t *testing.T, cfg *LocalConfig, fakes ...*fakeFnRole) *HybridRole {
 	t.Helper()
 	r := newHybridRole(cfg.Kind, testLogger(), cfg, "")
-	orig := functionRole
-	functionRole = func(fn string, _ *slog.Logger, _ *LocalConfig) (Role, error) {
+	restore := setFunctionRole(func(fn string, _ *slog.Logger, _ *LocalConfig) (Role, error) {
 		for _, f := range fakes {
 			if f.fn == fn {
 				return f, nil
 			}
 		}
 		return nil, nil // caller treats nil carefully; tests only request fakes
-	}
-	t.Cleanup(func() { functionRole = orig })
+	})
+	t.Cleanup(restore)
 	return r
 }
 
@@ -348,14 +347,13 @@ func TestHybridRoleCLIOverrideBeatsSettings(t *testing.T) {
 	agent := newFakeFn(t, FnAgent)
 	scanner := newFakeFn(t, FnScanner)
 	r := newHybridRole("scanner", testLogger(), &LocalConfig{Kind: "scanner", ConnectorID: "c", Secret: "s"}, FnAgent)
-	orig := functionRole
-	functionRole = func(fn string, _ *slog.Logger, _ *LocalConfig) (Role, error) {
+	restore := setFunctionRole(func(fn string, _ *slog.Logger, _ *LocalConfig) (Role, error) {
 		if fn == FnAgent {
 			return agent, nil
 		}
 		return scanner, nil
-	}
-	t.Cleanup(func() { functionRole = orig })
+	})
+	t.Cleanup(restore)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() { _ = r.Run(ctx, testLogger()) }()

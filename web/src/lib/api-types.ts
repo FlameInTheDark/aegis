@@ -14,6 +14,7 @@ export interface Me {
   user: { id: string; email: string; name: string }
   organizations: { id: string; name: string; slug: string; role: string }[]
   current_organization_id: string
+  permissions?: string[]
 }
 
 export interface Site {
@@ -164,6 +165,10 @@ export interface Finding {
   remediation?: string
   first_seen: string
   last_seen: string
+  /** inventory identity resolved server-side from the linked service or
+   *  software row; empty for heuristic findings without a link */
+  product?: string
+  version?: string
 }
 
 export interface Evidence {
@@ -611,4 +616,217 @@ export interface MetricsSummary {
 export interface CursorPage<T> {
   items: T[]
   next_cursor?: string
+}
+
+// ---------------------------------------------------------------------------
+// Alerts (alert-trigger engine): occurrences, trigger rules, destinations.
+
+export interface AlertOccurrence {
+  id: string
+  organization_id: string
+  trigger_id: string
+  fingerprint: string
+  state: 'firing' | 'acknowledged' | 'recovered' | 'suppressed'
+  severity: string
+  title: string
+  summary: string
+  site_id?: string
+  asset_id?: string
+  entity_type?: string
+  entity_id?: string
+  snapshot: Record<string, unknown>
+  evidence: unknown[]
+  occurrence_count: number
+  opened_at: string
+  acknowledged_at?: string
+  recovered_at?: string
+  updated_at: string
+  trigger_name?: string
+}
+
+export interface AlertTransition {
+  id: string
+  organization_id: string
+  occurrence_id: string
+  from_state: string
+  to_state: string
+  event_id: string
+  observed_value?: number
+  actor: string
+  reason: string
+  request_id: string
+  created_at: string
+}
+
+export interface AlertDelivery {
+  id: string
+  organization_id: string
+  occurrence_id: string
+  destination_id: string
+  kind: string
+  status: 'pending' | 'retry' | 'sent' | 'dead'
+  attempts: number
+  next_attempt_at: string
+  last_status_code?: number
+  last_error: string
+  idempotency_key: string
+  created_at: string
+  sent_at?: string
+  destination_name?: string
+}
+
+export interface AlertTriggerScope {
+  site_ids?: string[]
+  asset_ids?: string[]
+  device_types?: string[]
+}
+
+export interface AlertTrigger {
+  id: string
+  organization_id: string
+  name: string
+  description: string
+  kind: 'event' | 'device_metric'
+  enabled: boolean
+  lifecycle: 'stable' | 'experimental' | 'deprecated'
+  severity: string
+  scope: AlertTriggerScope
+  conditions: Record<string, unknown>
+  event_types: string[]
+  recovery_event_types: string[]
+  metric_field: string
+  aggregation: string
+  operator: string
+  threshold: number
+  window_secs: number
+  group_by: string
+  activation_secs: number
+  recovery_secs: number
+  recovery_threshold?: number
+  missing_data_policy: string
+  cooldown_secs: number
+  repeat_secs: number
+  destination_ids: string[]
+  revision: number
+  created_by: string
+  created_at: string
+  updated_at: string
+  last_evaluated_at?: string
+  last_error: string
+}
+
+export interface AlertDestination {
+  id: string
+  organization_id: string
+  kind: 'webhook' | 'in_app'
+  name: string
+  url: string
+  secret_masked?: string
+  events: string[]
+  min_severity: string
+  enabled: boolean
+  created_by: string
+  created_at: string
+  updated_at: string
+  last_success_at?: string
+  last_error: string
+}
+
+export interface AlertTriggerCaps {
+  type: string
+  description: string
+  fields: { field: string; type: string }[]
+}
+
+export interface AlertCapabilities {
+  event_types: AlertTriggerCaps[]
+  metric_fields: { field: string; unit: string; description: string }[]
+  aggregations: string[]
+  operators: { op: string; label: string; kind: string }[]
+  severities: string[]
+  lifecycles: string[]
+  missing_data_policies: string[]
+  group_by: string[]
+  window_presets: { secs: number; label: string }[]
+  duration_steps: number[]
+  delivery_kinds: string[]
+  destination_kinds: string[]
+}
+
+// ---------------------------------------------------------------------------
+// Vulnerability search actions.
+
+export interface VulnSearchAction {
+  id: string
+  organization_id: string
+  name: string
+  description: string
+  target_kind: 'software' | 'service'
+  selector: Record<string, unknown>
+  mode: 'shadow' | 'augment' | 'fallback_only'
+  priority: number
+  enabled: boolean
+  version_policy: Record<string, unknown>
+  confidence_cap: number
+  revision: number
+  created_by: string
+  created_at: string
+  updated_at: string
+}
+
+export interface VulnSearchRun {
+  id: string
+  organization_id: string
+  action_id: string
+  revision: number
+  state: 'pending' | 'running' | 'completed' | 'failed'
+  progress: number
+  requester: string
+  candidates: number
+  matches: number
+  findings_created: number
+  errors: unknown[]
+  started_at?: string
+  finished_at?: string
+  created_at: string
+}
+
+export interface VulnSearchPreview {
+  targets: number
+  truncated: boolean
+  matches: number
+  rows?: {
+    target: { type: string; id: string; asset_id: string; name: string; vendor: string; version: string; ecosystem: string }
+    cve_id: string
+    match_type: string
+    confidence: number
+    reason: string
+  }[]
+}
+
+export interface VulnSearchCaps {
+  target_kinds: string[]
+  fields: string[]
+  operators: string[]
+  modes: string[]
+  sources: { source: string; available: boolean; description: string }[]
+  limits: { target_cap: number; values_cap: number; conditions_cap: number }
+}
+
+export interface AssetVulnDiagnostics {
+  asset_id: string
+  diagnostics: {
+    type: string
+    id: string
+    name: string
+    vendor: string
+    version: string
+    raw_version?: string
+    ecosystem?: string
+    alias_applied?: string
+    findings: string[]
+    configured_matches: number
+  }[]
+  enabled_actions: number
+  sources: { cpe: boolean; osv: boolean; oval: boolean }
 }

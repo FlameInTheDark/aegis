@@ -30,7 +30,9 @@ func ParseCPE(s string) (CPE, bool) {
 	if s == "" {
 		return CPE{}, false
 	}
-	parts := strings.Split(s, ":")
+	// Split on unescaped colons only — a naive strings.Split corrupts
+	// vendor/product names carrying \: escapes (field misalignment).
+	parts := splitCPEFields(s)
 	if len(parts) < 4 {
 		return CPE{}, false
 	}
@@ -62,10 +64,51 @@ func ParseCPE(s string) (CPE, bool) {
 	return c, true
 }
 
+// splitCPEFields splits a CPE string on unescaped colons. Per CPE 2.3,
+// a backslash escapes the next character (\: is a literal colon, \\
+// a literal backslash), so those sequences must not terminate a field.
+func splitCPEFields(s string) []string {
+	var parts []string
+	var b strings.Builder
+	escaped := false
+	for _, r := range s {
+		switch {
+		case escaped:
+			b.WriteRune(r)
+			escaped = false
+		case r == '\\':
+			escaped = true
+		case r == ':':
+			parts = append(parts, b.String())
+			b.Reset()
+		default:
+			b.WriteRune(r)
+		}
+	}
+	parts = append(parts, b.String())
+	return parts
+}
+
+// unescapeCPE resolves backslash escapes to their literal characters.
 func unescapeCPE(s string) string {
-	s = strings.ReplaceAll(s, "\\:", ":")
-	s = strings.ReplaceAll(s, "\\.", ".")
-	return s
+	var b strings.Builder
+	escaped := false
+	for _, r := range s {
+		if escaped {
+			b.WriteRune(r)
+			escaped = false
+			continue
+		}
+		if r == '\\' {
+			escaped = true
+			continue
+		}
+		b.WriteRune(r)
+	}
+	if escaped {
+		b.WriteRune('\\') // trailing lone backslash: keep verbatim
+	}
+	return b.String()
 }
 
 // FormatCPE renders a CPE struct back to the canonical 2.3 string.

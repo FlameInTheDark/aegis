@@ -10,6 +10,7 @@ import {
   useAssetGroups, useAsset, useConnections, useDetectionMatches,
   useFeeds, useMetricsSummary, useScans, useSites,
 } from "@/lib/queries";
+import { useAlertOccurrences } from "@/lib/queries.alerts";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -62,6 +63,7 @@ function useNavCounts(): Record<string, number | string> {
   const metrics = useMetricsSummary(site);
   const scans = useScans({ ...siteParam, state: "running", limit: 50 });
   const detections = useDetectionMatches({ status: "new", limit: 1 });
+  const alerts = useAlertOccurrences({ state: "active", limit: 1 });
   const connections = useConnections();
   const groups = useAssetGroups();
 
@@ -70,6 +72,7 @@ function useNavCounts(): Record<string, number | string> {
     scans: scans.data?.items.length ?? 0,
     findings: metrics.data?.vulnerabilities ?? 0,
     detections: detections.data?.total ?? 0,
+    alerts: alerts.data?.total ?? 0,
     connections: connections.data?.filter((c) => c.status === "pending" || !c.online).length ?? 0,
     groups: groups.data?.length ?? 0,
   }), [metrics.data, scans.data, detections.data, connections.data, groups.data]);

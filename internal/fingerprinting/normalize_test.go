@@ -100,3 +100,23 @@ func TestServiceToCPE(t *testing.T) {
 		t.Fatalf("no product -> no CPE, got %v", cpes)
 	}
 }
+
+// Escaped separators (\: \. \\) are literal characters, not field breaks —
+// a naive strings.Split corrupted vendor/product names carrying them.
+func TestParseCPEScapedFields(t *testing.T) {
+	c, ok := ParseCPE(`cpe:2.3:a:with\:colon:prod\:uct:1\.0:*:*:*:*:*:*`)
+	if !ok {
+		t.Fatalf("escaped CPE must parse")
+	}
+	if c.Vendor != "with:colon" || c.Product != "prod:uct" {
+		t.Errorf("vendor/product = %q/%q, want with:colon/prod:uct", c.Vendor, c.Product)
+	}
+	if c.Version != "1.0" {
+		t.Errorf("version = %q, want 1.0", c.Version)
+	}
+	// Round-trip: FormatCPE escapes, ParseCPE restores.
+	again, ok := ParseCPE(FormatCPE(c))
+	if !ok || again.Vendor != c.Vendor || again.Product != c.Product || again.Version != c.Version {
+		t.Errorf("round-trip mismatch: %+v vs %+v", again, c)
+	}
+}

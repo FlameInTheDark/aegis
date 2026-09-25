@@ -1,0 +1,13 @@
+DROP TABLE IF EXISTS vuln_identity_aliases;
+DROP TABLE IF EXISTS vuln_match_provenance;
+DROP TABLE IF EXISTS vuln_search_runs;
+DROP TABLE IF EXISTS vuln_search_action_revisions;
+DROP TABLE IF EXISTS vuln_search_actions;
+DROP TABLE IF EXISTS alert_deliveries;
+DROP TABLE IF EXISTS alert_transitions;
+DROP TABLE IF EXISTS alert_occurrences;
+DROP TABLE IF EXISTS alert_rule_states;
+DROP TABLE IF EXISTS alert_triggers;
+DROP TABLE IF EXISTS alert_destinations;
+DROP TABLE IF EXISTS correlation_jobs;
+DROP TABLE IF EXISTS event_outbox;

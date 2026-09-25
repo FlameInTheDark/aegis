@@ -184,6 +184,13 @@ export function FindingsPage() {
                     ) : (
                       <span className="text-xs text-muted-foreground">—</span>
                     )}
+                    {/* inventory identity: makes the CVE's product readable
+                        at a glance instead of only inside the detail sheet */}
+                    {(f.product || f.version) && (
+                      <div className="mt-0.5 text-[11px] leading-tight text-muted-foreground">
+                        {[f.product, f.version].filter(Boolean).join(" ")}
+                      </div>
+                    )}
                   </TableCell>
                   <TableCell>
                     <div className="flex w-24 items-center gap-2">
@@ -260,6 +267,21 @@ function FindingDetailSheet({ findingId, onClose }: { findingId: string; onClose
       },
     );
   };
+
+  // Product/version provenance: the server resolves the identity of the
+  // linked software/service row; heuristic findings fall back to the
+  // observed identity recorded in evidence details (CPE_MATCH etc.).
+  const evIdentity = React.useMemo(() => {
+    for (const e of evidence) {
+      const d = e.detail ?? {};
+      const product = (d.observed_product ?? d.product ?? d.package) as string | undefined;
+      const version = (d.observed_version ?? d.version) as string | undefined;
+      if (product || version) return { product, version };
+    }
+    return { product: undefined, version: undefined };
+  }, [evidence]);
+  const product = detail?.product || evIdentity.product;
+  const version = detail?.version || evIdentity.version;
 
   return (
     <Sheet open onOpenChange={(o) => !o && onClose()}>
@@ -370,6 +392,10 @@ function FindingDetailSheet({ findingId, onClose }: { findingId: string; onClose
                   ) : (
                     "—"
                   )}
+                </KeyValue>
+                <KeyValue label="Product">{product ?? "—"}</KeyValue>
+                <KeyValue label="Version">
+                  {version ? <Mono className="text-xs">{version}</Mono> : "—"}
                 </KeyValue>
                 <KeyValue label="First seen">{formatDateTime(detail.firstSeen)}</KeyValue>
                 <KeyValue label="Last seen">{formatDateTime(detail.lastSeen)}</KeyValue>

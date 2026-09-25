@@ -17,7 +17,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/FlameInTheDark/aegis/internal/alerting"
 	"github.com/FlameInTheDark/aegis/internal/domain"
+	"github.com/FlameInTheDark/aegis/internal/fingerprinting"
 	"github.com/FlameInTheDark/aegis/internal/platform"
 	pg "github.com/FlameInTheDark/aegis/internal/repository/postgres"
 )
@@ -185,6 +187,10 @@ type Runner struct {
 	Store *platform.ObjectStore
 	Log   *slog.Logger
 	Jobs  []FeedJob
+	// DB enables feed.sync.* / feed.recovered / vulnerability.index.updated
+	// emission into the alert outbox (events fan out per organization,
+	// because feeds are deployment-global); nil disables emission.
+	DB *pg.DB
 
 	mu      sync.Mutex
 	running map[string]bool // per-feed single-flight guard
@@ -307,7 +313,26 @@ func (r *Runner) RunOne(ctx context.Context, job FeedJob, full bool) (err error)
 		r.Log.Warn("status update failed", "feed", job.Name(), "err", uerr)
 	}
 	r.Log.Info("feed synced", "feed", job.Name(), "status", status, "processed", processed, "created", created, "updated", updated, "rejected", rejected, "took", time.Since(started).Round(time.Millisecond))
+	if r.DB != nil {
+		r.emitCompletion(ctx, job.Name(), status, int64(processed), errMsg)
+	}
 	return err
+}
+
+// emitCompletion fans the feed outcome out per organization: feeds are
+// deployment-global, alert triggers are org-scoped. The stable
+// feed-health dedup key means the recovery event resolves an open
+// feed.stale occurrence and is a harmless no-op otherwise.
+func (r *Runner) emitCompletion(ctx context.Context, feed, status string, records int64, errMsg string) {
+	orgs, err := pg.NewOrgRepo(r.DB).List(ctx)
+	if err != nil {
+		r.Log.Warn("feed event fan-out failed", "err", err)
+		return
+	}
+	for _, org := range orgs {
+		_ = alerting.EmitFeedSync(ctx, r.DB, org.ID, feed, status, records, errMsg)
+		_ = alerting.EmitFeedStaleness(ctx, r.DB, org.ID, feed, false)
+	}
 }
 
 // storeRaw keeps the original upstream payload for provenance.
@@ -569,7 +594,12 @@ type nvdCVE struct {
 	Configurations []struct {
 		Nodes []struct {
 			CPEMatch []struct {
-				Criteria              string `json:"criteria"`
+				Criteria string `json:"criteria"`
+				// Vulnerable defaults to true when NVD omits it;
+				// explicit false marks a negated match (what the
+				// CVE does NOT affect) and must never create
+				// applicability.
+				Vulnerable            *bool  `json:"vulnerable"`
 				VersionStartIncluding string `json:"versionStartIncluding"`
 				VersionStartExcluding string `json:"versionStartExcluding"`
 				VersionEndIncluding   string `json:"versionEndIncluding"`
@@ -763,14 +793,38 @@ func nvdToDomain(c nvdCVE, now time.Time) *domain.Vulnerability {
 	for _, r := range c.References {
 		v.References = append(v.References, r.URL)
 	}
+	seenCriteria := map[string]bool{}
 	for _, cfg := range c.Configurations {
 		for _, node := range cfg.Nodes {
 			for _, cm := range node.CPEMatch {
-				v.CPEMatches = append(v.CPEMatches, domain.CPEMatch{
+				// Negated matches declare what the CVE does NOT
+				// affect; they must never become applicability rows.
+				if cm.Vulnerable != nil && !*cm.Vulnerable {
+					continue
+				}
+				// NVD repeats the same expression across AND/OR
+				// nodes; one applicability row per distinct
+				// criteria+bounds tuple.
+				key := cm.Criteria + "|" + cm.VersionStartIncluding + "|" + cm.VersionStartExcluding + "|" + cm.VersionEndIncluding + "|" + cm.VersionEndExcluding
+				if seenCriteria[key] {
+					continue
+				}
+				seenCriteria[key] = true
+				m := domain.CPEMatch{
 					CPE: cm.Criteria, VersionStartIncl: cm.VersionStartIncluding,
 					VersionStartExcl: cm.VersionStartExcluding, VersionEndIncl: cm.VersionEndIncluding,
 					VersionEndExcl: cm.VersionEndExcluding,
-				})
+				}
+				// Index the identity so vendor/product candidate
+				// queries reach the row — the raw criteria alone
+				// left 99%+ of NVD applicability unsearchable. The
+				// matcher still evaluates against the full raw CPE.
+				if p, ok := fingerprinting.ParseCPE(cm.Criteria); ok {
+					m.Vendor = p.Vendor
+					m.Product = p.Product
+					m.Version = p.Version
+				}
+				v.CPEMatches = append(v.CPEMatches, m)
 			}
 		}
 	}

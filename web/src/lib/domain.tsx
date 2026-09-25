@@ -1,6 +1,6 @@
 import {
   Activity,
-  Bell,
+  Bell, BellRing,
   Box,
   Bug,
   Cable,
@@ -64,6 +64,7 @@ export const navGroups: NavGroup[] = [
   {
     label: "Detect",
     items: [
+      { id: "alerts", label: "Alerts", path: "/alerts", icon: BellRing, description: "Trigger conditions, occurrences and destinations" },
       { id: "detections", label: "Detections", path: "/detections", icon: Bell, description: "Sensor and agent alerts" },
       { id: "events", label: "Events", path: "/events", icon: Activity, description: "Platform activity stream" },
     ],

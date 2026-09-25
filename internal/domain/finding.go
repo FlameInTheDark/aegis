@@ -53,6 +53,13 @@ type Finding struct {
 	ResolvedAt      *time.Time    `json:"resolved_at,omitempty"`
 	CreatedAt       time.Time     `json:"created_at"`
 	UpdatedAt       time.Time     `json:"updated_at"`
+	// Product and Version identify the concrete software or service row
+	// the finding was correlated against, resolved by the findings repo
+	// with LEFT JOINs at read time (software.name/version, or the
+	// service's product/detected version). Empty when the finding has no
+	// inventory link yet (heuristic matches) or the row is gone.
+	Product string `json:"product,omitempty"`
+	Version string `json:"version,omitempty"`
 }
 
 // Evidence is a structured proof record backing a finding.

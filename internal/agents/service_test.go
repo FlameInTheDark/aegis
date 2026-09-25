@@ -229,7 +229,10 @@ func (f *fakeIdent) Upsert(_ context.Context, assetID, typ, val string, weight f
 	}{assetID, typ, val, weight})
 	return nil
 }
-func (f *fakeIdent) FindByIdentifier(_ context.Context, typ, val string) ([]string, error) {
+func (f *fakeIdent) FindByIdentifier(_ context.Context, orgID, typ, val string) ([]string, error) {
+	if orgID == "" {
+		return nil, nil
+	}
 	return f.index[typ+"|"+val], nil
 }
 

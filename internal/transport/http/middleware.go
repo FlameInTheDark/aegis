@@ -377,10 +377,19 @@ func (a *App) handleMe(c *fiber.Ctx) error {
 		role, _ := a.svc.Memberships.RoleFor(ctx, user.ID, o.ID)
 		out = append(out, orgWithRole{Organization: o, Role: role})
 	}
+	// Current effective permissions: derived server-side from the CURRENT
+	// role (never from the stale JWT permission claim) so the UI can hide
+	// controls without the server ever trusting that hiding.
+	perms := auth.PermissionsFor(claims.Role)
+	permStrings := make([]string, 0, len(perms))
+	for _, p := range perms {
+		permStrings = append(permStrings, string(p))
+	}
 	return c.JSON(fiber.Map{
 		"user":                    tokenUser{ID: user.ID, Email: user.Email, Name: user.Name},
 		"organizations":           out,
 		"current_organization_id": claims.OrganizationID,
+		"permissions":             permStrings,
 	})
 }
 

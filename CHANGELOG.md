@@ -1,3 +1,211 @@
+## [1.32.2] - 2026-09-25
+
+### Fixed
+- **Alerts console is accessible again.** The `alert:read` and
+  `alert:manage` permissions were enforced by the API but granted to no
+  role, so every account - including the owner - received
+  `403 insufficient role for alert:manage` on every alert endpoint.
+  Roles now follow docs/ALERTS.md: `alert:read` for viewer and up,
+  `alert:manage` for security_analyst, administrator and owner.
+  Regression tests pin the alert mapping and guard that every declared
+  permission is granted to at least one role.
+
+## [1.32.1] - 2026-09-25
+
+### Fixed
+- **Worker no longer dies at startup.** The schema-version gate re-read the
+  embedded migration tree through a sub-FS that is already rooted at
+  `postgres/`, adding a duplicate prefix, and aborted every start with
+  `fatal: schema version: open postgres: file does not exist` before any
+  job loop ran (broken since 1.30.0). The highest embedded migration
+  version now comes from `migrations.PostgresMaxVersion()`, covered by a
+  regression test that cross-checks it against the embedded file list.
+- Connector: fixed a data race between the hybrid role's function-start
+  hook and test cleanup that failed `go test -race` runs.
+
+## [1.32.0] - 2026-09-25
+
+### Added
+- **Product and version on findings.** Finding responses now carry the
+  inventory identity of the matched software or service row (package name
+  and version, or the service's product and detected version), resolved
+  server-side with LEFT JOINs. The findings table shows it under the CVE,
+  and the finding detail sheet gains Product and Version rows next to
+  CVE / First seen / Last seen — a CPE_MATCH finding is no longer an
+  anonymous CVE id. Heuristic findings without an inventory link fall
+  back to the observed identity recorded in their evidence details.
+
+### Fixed
+- Vulnerabilities page: vertical spacing between the KPI panels, the
+  filters line and the results table (the tab panel stacked them with no
+  gap).
+- Overview: the severity-distribution donut's tooltip no longer hides
+  behind the centered findings count.
+
+## [1.31.0] - 2026-09-25
+
+### Added
+- **Performance-metric trigger presets, reachable where the metrics are
+  watched.** Device-metric triggers (CPU, memory, network, load) shipped
+  with the alerting engine, but the only way to create one was a blank
+  editor inside the Alerts console. The trigger-rules toolbar and empty
+  state now offer one-click presets — "High CPU utilization" and "High
+  memory utilization" (average above 90% over a 5-minute window, sustained
+  for 2 minutes, recovering after 5 minutes healthy) — that open the
+  visual editor prefilled. The asset page's Performance view gains a
+  "Create alert" action on the current-load card: CPU and memory presets
+  arrive pre-scoped to that asset and pre-titled with its hostname, and a
+  "Manage trigger rules…" shortcut opens the Alerts console. Deep links
+  (`/alerts?tab=triggers&new=metric&metric=…&asset=…&label=…`) seed the
+  editor directly and are stripped from the URL after opening.
+
+## [1.30.0] - 2026-09-24
+
+### Added
+- **Alert trigger engine: the whole plane lives behind the new Alerts
+  console.** Reliable domain transitions (asset/service/software
+  discovered, device bound, findings created and status-changed, scans
+  completed/failed, feeds completed/partial/failed/stale/recovered,
+  endpoint agents offline, detection matches) are written to a
+  transactional PostgreSQL outbox next to the mutation that caused them,
+  relayed to a dedicated JetStream stream with explicit subject
+  filtering, and applied by the worker's evaluator to organization-scoped
+  triggers. Event triggers carry a typed condition DSL (bounded
+  `all`/`any` groups, closed operator set, compile-validated regex,
+  rejected unknown keys) and optional recovery event types that resolve
+  matching open occurrences. Metric triggers evaluate ClickHouse rolling
+  windows per device (`cpu_percent`, `mem_used_percent`, `rx_bps`,
+  `tx_bps`, `load1/5/15`) with `avg/min/max/p95/sum/count`, activation
+  duration, recovery duration and hysteresis.
+- **Persistent alert state with exactly-one-occurrence semantics.**
+  Rule state, occurrences, transitions and deliveries live in PostgreSQL
+  (migration 0035, additive). A partial unique index makes duplicate,
+  replayed or delayed events harmless: one open episode per
+  trigger/fingerprint, ever. Cooldown suppresses flap, repeat re-notifies
+  on schedule, and every lifecycle change is an append-only transition.
+- **Durable signed webhook delivery.** Destinations are validated
+  org-scoped channels with server-side HMAC secrets (returned masked
+  only), HTTPS-by-default with SSRF guards (redirects never followed,
+  link-local metadata always rejected, private targets behind an explicit
+  development flag), bounded timeouts and response sizes, exponential
+  retry up to five attempts, dead-lettering with one-click replay, and a
+  synthetic Test delivery. In-app alerts are the occurrences themselves —
+  console visibility never depends on destinations.
+- **The Alerts UI**: a four-view operator area under a new Detect-group
+  nav entry — Active occurrences (master/detail with evidence snapshot,
+  transition timeline, delivery attempts, acknowledge/resolve), History
+  (server-paginated), Trigger rules and Destinations. The trigger editor
+  is a visual step-by-step builder (basics, scope, trigger source,
+  conditions, behavior, destinations, review) driven by the server
+  capability catalog, with a compiled human-readable summary, separated
+  preview/test from save, optimistic-concurrency conflict handling, and
+  unsaved-draft recovery. `GET /auth/me` now returns the caller's
+  effective permissions so the UI can hide what the server would refuse.
+- **Vulnerability search actions and match workbench.** Tenant-
+  configurable declarative search plans over the local indexes only
+  (sources are an allowlist of `cpe`, `cve_affected`, `osv`, `oval` — no
+  URL, command or SQL can be encoded), with immutable action revisions,
+  durable idempotent runs executed by the worker, and per-match
+  provenance (action revision, source, CPE key, observed identity,
+  confidence). Shadow mode explains matches without writing findings;
+  augment mode writes findings with provenance. The asset page gains a
+  per-target Match diagnostics workbench (observed identity, normalized
+  version, effective alias, automatic vs configured matches, source
+  availability) and the vulnerabilities page hosts action management.
+- **Durable correlation jobs.** Post-feed sweeps, manual correlations and
+  search-action runs enqueue into a lease-claimed PostgreSQL job queue
+  instead of fire-and-forget goroutines; a crashed worker's job is
+  retried after lease expiry and poison jobs exhaust into a recorded
+  failure state.
+- **Endpoint software inventory.** Agent-reported packages now land in
+  the software inventory (previously dropped), with `software.installed`
+  events for genuinely new rows only.
+
+### Fixed
+- **Live metric charts read as moving instead of being redrawn.** Polling
+  charts on the asset performance page ran ECharts' default update
+  animation, so every refreshed window morphed each point from its old
+  value to the new one — the line appeared to be reshaped in place rather
+  than shifted by the new sample, and window switches replayed the entry
+  sweep. Polling charts now update with animation disabled: the refreshed
+  window snaps into place and the newest sample simply pushes the line
+  left. Interface sparklines follow the same behavior.
+- **The worker takes its own health seriously.** The worker now exposes
+  `/metrics`, `/healthz` and `/readyz` on its metrics listener (the
+  observability registry it previously constructed and discarded),
+  refuses job claims while the database schema is missing, dirty or older
+  than the embedded migrations, and reports 503 readiness instead of
+  consuming work against incomplete state. Migration errors are no longer
+  silently ignored at startup.
+
+## [1.29.0] - 2026-09-24
+
+### Fixed
+- **The vulnerability matcher can now see the NVD applicability data it
+  was blind to.** Feeds stored the raw CPE criteria of every applicability
+  row but never parsed the vendor/product/version identity out of it, so
+  the candidate query — which matches on indexed vendor and product —
+  found nothing for 99%+ of the corpus (including every OpenSSH CVE) and
+  the healthy feeds produced zero findings. The NVD parser now parses
+  each criterion with a CPE 2.3 parser that handles `\:` escaping and
+  wildcard/NA semantics, indexes the identity, honors negated
+  (`vulnerable: false`) matches, and deduplicates repeated expressions. A
+  background backfill at server start parses the stored criteria of
+  existing rows (idempotent, cursor-driven, batched) so the fix applies
+  to the corpus already on disk without re-downloading the feeds.
+- **Heuristics can no longer starve a definitive match.** The matcher
+  marked a CVE as seen after the first identity that surfaced it, capped
+  results per identity, and returned the first verdict per expression —
+  so a weak heuristic seen early permanently hid a later exact/range
+  result. Each CVE is now evaluated against every candidate identity and
+  the strongest verdict wins (exact > range > potential); the caller cap
+  applies after all identities are evaluated and results are ranked, and
+  a `truncated` flag reports when the cap hid results. Within one CVE, a
+  versionless expression can no longer shadow a versioned expression of
+  the same product that rejected the observed version, and a stale
+  scanner-carried version can no longer outrank the authoritative
+  observed version's verdict.
+- **Candidate loading is batched.** Correlation loaded every candidate
+  with its own CVE + CPE query pair (N+1 across a product's candidate
+  set); candidate records now load in chunked batches, and every loaded
+  record is hydrated with its CPE matches, the latest EPSS snapshot and
+  KEV status — risk scoring used to see those fields empty on the match
+  path.
+- **Asset identity lookups are organization-scoped in the query.** The
+  global identifier lookup let one tenant's hostnames, MACs and addresses
+  surface in another tenant's candidate sets (poisoning ambiguity skips
+  and adoption decisions) and leaked asset IDs across tenants. All
+  identifier lookups now filter by organization in SQL and an empty
+  organization fails closed; the scan pipeline's OS/device recorders
+  scope their asset fetches the same way.
+- **Finding refreshes are no longer reported as creations.** The finding
+  upsert reported every refresh as a new finding, inflating new-finding
+  counts and mislabelling lifecycle events; the upsert now distinguishes
+  a real insert from a refresh and callers propagate the outcome.
+
+### Tests
+- CPE escape handling with round-trip, NVD identity indexing (negation +
+  dedupe), the matcher acceptance matrix (heuristics cannot starve a
+  definitive range; wrong or versionless identities cannot suppress a
+  correct range; exclusive OpenSSH bounds; truncated flag), and
+  integration coverage for the upsert outcome split and cross-tenant
+  identifier isolation (Postgres-gated).
+
+## [1.28.2] - 2026-09-24
+
+### Added
+- **The range timeline now shows RAM and network activity alongside CPU.**
+  The timeline strip used to plot a single CPU line, so a range picked
+  visually could hide memory pressure and traffic bursts that the charts
+  below would then reveal. The strip now draws four series: CPU (indigo)
+  and RAM as used/total percent on the left axis, and receive/transmit
+  throughput on a new right axis in bytes per second — one shared axis
+  would flatten the percent lines into noise next to byte-scale rates.
+  Colors match the memory and throughput charts, a compact legend names
+  the four lines, and the hover tooltip formats each series in its own
+  unit (percent vs B/s). RAM renders as a gap when a bucket carries no
+  memory reading instead of a false 0%.
+
 ## [1.28.1] - 2026-09-24
 
 ### Fixed

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/FlameInTheDark/aegis/internal/agents"
+	"github.com/FlameInTheDark/aegis/internal/alerting"
 	"github.com/FlameInTheDark/aegis/internal/assets"
 	"github.com/FlameInTheDark/aegis/internal/audit"
 	"github.com/FlameInTheDark/aegis/internal/auth"
@@ -143,10 +144,26 @@ func run() error {
 	}
 	vulnRepo := pg.NewVulnRepo(db)
 	feedRepo := pg.NewFeedRepo(db)
+	// Backfill the CPE identity index in the background: feeds stored blank
+	// vendor/product columns before the identity fix, leaving candidate
+	// lookup blind to nearly every NVD applicability row. Idempotent — a
+	// converged run is one indexed scan — and failure is logged, not fatal.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 6*time.Hour)
+		defer cancel()
+		n, err := vulnRepo.BackfillCPEIdentity(ctx, 2000)
+		switch {
+		case err != nil:
+			log.Warn("cpe identity backfill interrupted", "filled", n, "err", err)
+		case n > 0:
+			log.Info("cpe identity backfill complete", "filled", n)
+		}
+	}()
 	correlator := &vulnerabilities.Correlator{
 		Index: vulnRepo, Findings: pg.NewFindingRepo(db), Evidence: pg.NewEvidenceRepo(db),
 		Assets: assetsRepo, Services: servicesRepo, Software: softwareRepo, Log: log,
 		Advisories: pg.NewAdvisoryRepo(db),
+		DB:         db,
 	}
 	scanRepo, taskRepo, scannerRepo := pg.NewScanRepo(db), pg.NewTaskRepo(db), pg.NewScannerRepo(db)
 	topoRepo := pg.NewTopologyRepo(db)
@@ -160,6 +177,7 @@ func run() error {
 		Assets: assetsRepo, Ident: identRepo, Ifaces: ifacesRepo,
 		Services: servicesRepo, Software: softwareRepo, Changes: changesRepo, Log: log,
 		IPStale: assets.IPStaleFromEnv(),
+		DB:      db,
 	}
 	orch := &scanning.Orchestrator{
 		Scans: scanRepo, Tasks: taskRepo, Observations: pg.NewObservationRepo(db),
@@ -187,10 +205,12 @@ func run() error {
 		Repo: pg.NewAgentRepo(db), Tasks: pg.NewAgentTaskRepo(db),
 		Events: pg.NewAgentEventRepo(db), Assets: assetsRepo, Ifaces: pg.NewInterfaceRepo(db),
 		Ident: identRepo, Sites: pg.NewSiteRepo(db), Merger: assetsRepo, IPStale: assets.IPStaleFromEnv(), Log: log,
+		Software: softwareRepo, DB: db,
 	}
 	detectEngine := &detections.Engine{
 		Rules: pg.NewRuleRepo(db), Matches: pg.NewMatchRepo(db), Baselines: pg.NewBaselineRepo(db),
 		Cache: rdb, Log: log,
+		Outbox: pg.NewOutboxRepo(db),
 	}
 	ingestor := &telemetry.Ingestor{Bus: bus, CH: chDB, Engine: detectEngine, Cache: rdb, Log: log, BatchSize: 500}
 	reportsSvc := &reports.Service{
@@ -238,6 +258,10 @@ func run() error {
 	}
 
 	svc := &httpx.Services{
+		DB:            db,
+		AlertTriggers: pg.NewAlertTriggerRepo(db), Alerts: pg.NewAlertOccurrenceRepo(db),
+		AlertDestinations: pg.NewDestinationRepo(db), Outbox: pg.NewOutboxRepo(db),
+		CorrelationJobs: pg.NewCorrelationJobRepo(db), VulnSearch: pg.NewVulnSearchRepo(db),
 		Version: version,
 		Cfg:     cfg, Log: log, Health: health, Bus: bus, Redis: rdb, CH: chDB,
 		Orgs: pg.NewOrgRepo(db), Users: pg.NewUserRepo(db), Memberships: pg.NewMembershipRepo(db),
@@ -362,6 +386,12 @@ func run() error {
 			}
 			switch evt.State {
 			case string(domain.ScanCompleted):
+				_ = alerting.EmitScanStateChanged(ctx, db, orgID, func() string {
+					if scan, err := scanRepo.ByID(ctx, "", evt.ScanID); err == nil {
+						return scan.SiteID
+					}
+					return ""
+				}(), evt.ScanID, evt.State, "", 0)
 				joblog.PublishNotification(ctx, bus, &domain.NotificationEvent{
 					ID: ids.New(), OrgID: orgID, Type: domain.NotifyScanCompleted,
 					Title:    "Scan completed: " + scanName,
@@ -369,6 +399,7 @@ func run() error {
 					Severity: "info", Ref: map[string]string{"scan_id": evt.ScanID},
 				})
 			case string(domain.ScanFailed):
+				_ = alerting.EmitScanStateChanged(ctx, db, orgID, "", evt.ScanID, evt.State, "", 0)
 				joblog.PublishNotification(ctx, bus, &domain.NotificationEvent{
 					ID: ids.New(), OrgID: orgID, Type: domain.NotifyScanFailed,
 					Title:    "Scan failed: " + scanName,

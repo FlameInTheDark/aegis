@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FlameInTheDark/aegis/internal/alerting"
 	"github.com/FlameInTheDark/aegis/internal/domain"
 	"github.com/FlameInTheDark/aegis/internal/ids"
 	pg "github.com/FlameInTheDark/aegis/internal/repository/postgres"
@@ -42,7 +43,11 @@ type Service struct {
 	Services *pg.ServiceRepo
 	Software *pg.SoftwareRepo
 	Changes  *pg.ChangeRepo
-	Log      *slog.Logger
+	// DB enables domain-event emission into the alert outbox (asset
+	// discovered, service discovered/changed, software installed); nil
+	// disables emission (tests, or consumers that must stay silent).
+	DB  *pg.DB
+	Log *slog.Logger
 	// IPStale bounds how long an IP observation keeps resolving to the same
 	// asset. 0 (the default) means: within a site, an address always maps to
 	// the asset that last held it — rescans update the asset instead of
@@ -60,7 +65,7 @@ type Service struct {
 //  3. otherwise a NEW asset is created.
 func (s *Service) ProvisionHost(ctx context.Context, orgID, siteID, scanID, ip, mac, macVendor, hostname, fqdn, source string, conf domain.Confidence) (*domain.Asset, bool, error) {
 	created := false
-	asset := s.findByStrongID(ctx, mac, hostname, fqdn)
+	asset := s.findByStrongID(ctx, orgID, mac, hostname, fqdn)
 	if asset == nil {
 		asset = s.findByAddress(ctx, orgID, siteID, ip)
 	}
@@ -82,6 +87,10 @@ func (s *Service) ProvisionHost(ctx context.Context, orgID, siteID, scanID, ip, 
 		created = true
 		if s.Changes != nil && scanID != "" {
 			s.recordChange(ctx, scanID, siteID, domain.ChangeNewAsset, asset.ID, "", "", ip)
+		}
+		if s.DB != nil {
+			// Reliable transition: a NEW device entered the inventory.
+			_ = alerting.EmitAssetDiscovered(ctx, s.DB, orgID, siteID, asset.ID, hostname, source, string(asset.DeviceType))
 		}
 	}
 
@@ -137,7 +146,7 @@ func (s *Service) ProvisionHost(ctx context.Context, orgID, siteID, scanID, ip, 
 // replaces the stored fingerprint (equal-confidence observations refresh the
 // values instead of bouncing off them), so a fresh scan always updates the
 // asset. Endpoint agents remain authoritative over network guesses.
-func (s *Service) RecordOS(ctx context.Context, scanID, siteID, assetID, family, name, version string, conf domain.Confidence, source string) {
+func (s *Service) RecordOS(ctx context.Context, orgID, scanID, siteID, assetID, family, name, version string, conf domain.Confidence, source string) {
 	if assetID == "" {
 		return
 	}
@@ -185,7 +194,7 @@ func (s *Service) RecordOS(ctx context.Context, scanID, siteID, assetID, family,
 // wins (floor 0.5), so a dedicated fingerprint scan refreshes the
 // classification while a weak service-table hint (0.55) can fill an
 // unclassified asset but never tramples a MAC-vendor or osclass verdict.
-func (s *Service) RecordDevice(ctx context.Context, scanID, siteID, assetID string, dt domain.DeviceType, conf domain.Confidence, source string) {
+func (s *Service) RecordDevice(ctx context.Context, orgID, scanID, siteID, assetID string, dt domain.DeviceType, conf domain.Confidence, source string) {
 	if assetID == "" || dt == "" || dt == domain.DeviceUnknown {
 		return
 	}
@@ -223,7 +232,8 @@ func (s *Service) RecordService(ctx context.Context, orgID, siteID, scanID, asse
 	svc.OrganizationID = orgID
 	svc.AssetID = assetID
 	svc.LastSeen = time.Now().UTC()
-	if existing != nil && existing.Product != "" && svc.Product != existing.Product {
+	productChanged := existing != nil && existing.Product != "" && svc.Product != existing.Product
+	if productChanged {
 		if s.Changes != nil && scanID != "" {
 			s.recordChange(ctx, scanID, siteID, domain.ChangeServiceChanged, assetID, fmt.Sprintf("%s/%d", svc.Protocol, svc.Port), existing.Product, svc.Product)
 		}
@@ -231,17 +241,31 @@ func (s *Service) RecordService(ctx context.Context, orgID, siteID, scanID, asse
 	if err := s.Services.Upsert(ctx, svc); err != nil {
 		return nil, err
 	}
+	if s.DB != nil {
+		_ = alerting.EmitService(ctx, s.DB, orgID, siteID, assetID, svc.ID,
+			fmt.Sprintf("%s/%d", svc.Protocol, svc.Port), svc.Product, productChanged)
+	}
 	return svc, nil
 }
 
 // RecordSoftware upserts an agent-reported package.
 func (s *Service) RecordSoftware(ctx context.Context, orgID, siteID, scanID, assetID string, sw *domain.Software) error {
+	exists, _, err := s.Software.ExistsForAsset(ctx, assetID, sw.Name, sw.Version, sw.Ecosystem)
+	if err != nil {
+		s.Log.Warn("software existence check failed", "asset", assetID, "err", err)
+	}
 	sw.AssetID = assetID
 	sw.LastSeen = time.Now().UTC()
 	if sw.ID == "" {
 		sw.ID = ids.New()
 	}
-	return s.Software.Upsert(ctx, sw)
+	if err := s.Software.Upsert(ctx, sw); err != nil {
+		return err
+	}
+	if !exists && s.DB != nil {
+		_ = alerting.EmitSoftwareInstalled(ctx, s.DB, orgID, siteID, assetID, sw.ID, sw.Name, sw.Version, sw.Ecosystem)
+	}
+	return nil
 }
 
 // MarkMissingAgent records an agent-absent posture change for a site.
@@ -252,7 +276,7 @@ func (s *Service) MarkMissingAgent(ctx context.Context, siteID, assetID string) 
 	_ = assetID
 }
 
-func (s *Service) findByStrongID(ctx context.Context, mac, hostname, fqdn string) *domain.Asset {
+func (s *Service) findByStrongID(ctx context.Context, orgID, mac, hostname, fqdn string) *domain.Asset {
 	type idpair struct{ typ, val string }
 	var pairs []idpair
 	if mac != "" {
@@ -265,7 +289,7 @@ func (s *Service) findByStrongID(ctx context.Context, mac, hostname, fqdn string
 		pairs = append(pairs, idpair{"fqdn", strings.ToLower(fqdn)})
 	}
 	for _, p := range pairs {
-		idsList, err := s.Ident.FindByIdentifier(ctx, p.typ, p.val)
+		idsList, err := s.Ident.FindByIdentifier(ctx, orgID, p.typ, p.val)
 		if err != nil || len(idsList) == 0 {
 			continue
 		}
@@ -274,7 +298,7 @@ func (s *Service) findByStrongID(ctx context.Context, mac, hostname, fqdn string
 		if len(idsList) > 1 {
 			continue
 		}
-		a, err := s.Assets.ByID(ctx, "", idsList[0])
+		a, err := s.Assets.ByID(ctx, orgID, idsList[0])
 		if err == nil && a != nil {
 			return a
 		}
@@ -290,13 +314,13 @@ func (s *Service) findByAddress(ctx context.Context, orgID, siteID, ip string) *
 	if ip == "" {
 		return nil
 	}
-	candidates, err := s.Ident.FindByIdentifier(ctx, "ip", ip)
+	candidates, err := s.Ident.FindByIdentifier(ctx, orgID, "ip", ip)
 	if err != nil || len(candidates) == 0 {
 		return nil
 	}
 	var best *domain.Asset
 	for _, id := range candidates {
-		a, err := s.Assets.ByID(ctx, "", id)
+		a, err := s.Assets.ByID(ctx, orgID, id)
 		if err != nil || a == nil || a.OrganizationID != orgID || a.SiteID != siteID {
 			continue
 		}

@@ -8,6 +8,7 @@ package vulnerabilities
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/FlameInTheDark/aegis/internal/domain"
@@ -51,6 +52,10 @@ type Index interface {
 	CandidateCVEsByProduct(ctx context.Context, vendor, product string, limit int) ([]string, error)
 	// CVE loads a full record including CPE matches.
 	CVE(ctx context.Context, cveID string) (*domain.Vulnerability, error)
+	// CVEs batch-loads full records including CPE matches. The matcher
+	// evaluates a candidate set per observation; loading them one round
+	// trip per CVE made candidate evaluation N+1.
+	CVEs(ctx context.Context, cveIDs []string) (map[string]*domain.Vulnerability, error)
 	// EPSSForCVEs returns latest EPSS per CVE.
 	EPSSForCVEs(ctx context.Context, cveIDs []string) (map[string]float64, error)
 	// KEVSet returns the set of known-exploited CVE ids.
@@ -65,10 +70,13 @@ type Matcher struct {
 	MaxPerItem int
 }
 
-// Match evaluates one input and returns explainable candidates.
-func (m *Matcher) Match(ctx context.Context, in MatchInput) ([]Match, error) {
+// Match evaluates one input and returns explainable candidates. The
+// second return value reports whether the caller cap hid results — a
+// truncated match list is a fact the UI/API must surface, never silently
+// swallow.
+func (m *Matcher) Match(ctx context.Context, in MatchInput) ([]Match, bool, error) {
 	if m.Index == nil {
-		return nil, fmt.Errorf("matcher: nil index")
+		return nil, false, fmt.Errorf("matcher: nil index")
 	}
 	max := m.MaxPerItem
 	if max <= 0 {
@@ -77,7 +85,8 @@ func (m *Matcher) Match(ctx context.Context, in MatchInput) ([]Match, error) {
 
 	// Package ecosystems use OSV-aware matching.
 	if in.Ecosystem != "" && in.PackageName != "" {
-		return m.matchPackage(ctx, in, max)
+		ms, err := m.matchPackage(ctx, in, max)
+		return ms, false, err
 	}
 	return m.matchService(ctx, in, max)
 }
@@ -222,16 +231,21 @@ func inRange(r domain.VersionRange, version, ecosystem string) (bool, *fingerpri
 	return true, deciding, &constraint
 }
 
-func (m *Matcher) matchService(ctx context.Context, in MatchInput, max int) ([]Match, error) {
-	// Build CPE candidate set. When a version is under judgment, the
-	// synthesized CPE carrying it (the caller's normalized input version)
-	// is evaluated FIRST — it is the authoritative observed version; an
-	// explicit scanner CPE may carry only the upstream part ("10.0p2") or
-	// a differently formatted string. Explicit CPEs follow, and the
-	// versionless synthesized fallback is last: it can only produce
-	// "potential" verdicts and must never preempt versioned ones. Without
-	// a version under judgment the original order holds (explicit CPEs,
-	// whose own version may pin or range, then the versionless fallback).
+// candidateScanLimit is the per-identity candidate fetch bound. It must be
+// generous: the caller cap is applied AFTER all identities are evaluated and
+// results ranked, so a definitive match deeper in a product's candidate list
+// is never starved by earlier heuristics (the old per-identity cap of `max`
+// cut exactly there).
+const candidateScanLimit = 500
+
+func (m *Matcher) matchService(ctx context.Context, in MatchInput, max int) ([]Match, bool, error) {
+	// Build CPE candidate identities. When a version is under judgment, the
+	// synthesized CPE carrying it (the caller's normalized input version) is
+	// evaluated FIRST — it is the authoritative observed version; an explicit
+	// scanner CPE may carry only the upstream part ("10.0p2") or a differently
+	// formatted string. Without a version under judgment the original order
+	// holds (explicit CPEs, whose own version may pin or range, then the
+	// versionless fallback).
 	synth := fingerprinting.ServiceToCPE(in.Vendor, in.Product, in.Version)
 	var cpes []string
 	if in.Version != "" && len(synth) > 0 {
@@ -243,75 +257,142 @@ func (m *Matcher) matchService(ctx context.Context, in MatchInput, max int) ([]M
 		cpes = append(cpes, synth...)
 	}
 
-	seen := map[string]bool{}
-	// rangeMiss records CVEs whose version bounds already rejected the
-	// observed version while evaluating the version-carrying CPE candidate.
-	// The versionless candidate (a deliberately weaker identity) must not
-	// resurrect them as "potential" — the vendor declared version bounds and
-	// the known observed version does not fit.
-	rangeMiss := map[string]bool{}
-	var out []Match
-	for _, cpeStr := range cpes {
+	// Dedupe parsed identities (order preserved). Every distinct identity is
+	// evaluated against every candidate CVE — the per-CVE best verdict wins,
+	// never the first identity that happened to see the CVE.
+	// identity pairs a parsed CPE with its version authority: the
+	// identity carrying the caller's normalized version (the synthesized
+	// CPE) outranks explicit scanner CPEs, which may carry a stale
+	// upstream version — their pin verdicts must not outrank the
+	// authoritative version's verdict.
+	type identity struct {
+		cpe       fingerprinting.CPE
+		authority int
+	}
+	var identities []identity
+	seenIdentity := map[string]bool{}
+	for idx, cpeStr := range cpes {
 		c, ok := fingerprinting.ParseCPE(cpeStr)
 		if !ok {
 			continue
 		}
-		ids, err := m.Index.CandidateCVEsByProduct(ctx, c.Vendor, c.Product, max)
+		k := c.Vendor + "|" + c.Product + "|" + c.Version
+		if seenIdentity[k] {
+			continue
+		}
+		seenIdentity[k] = true
+		auth := 0
+		if in.Version != "" && idx == 0 && len(synth) > 0 {
+			auth = 1 // the synthesized CPE carrying the observed version
+		}
+		identities = append(identities, identity{cpe: c, authority: auth})
+	}
+	if len(identities) == 0 {
+		return nil, false, nil
+	}
+
+	// Candidate scan: union over all identities.
+	candSet := map[string]bool{}
+	var cands []string
+	for _, ident := range identities {
+		ids, err := m.Index.CandidateCVEsByProduct(ctx, ident.cpe.Vendor, ident.cpe.Product, candidateScanLimit)
 		if err != nil {
-			return out, err
+			return nil, false, err
 		}
 		for _, id := range ids {
-			if seen[id] {
-				continue
+			if !candSet[id] {
+				candSet[id] = true
+				cands = append(cands, id)
 			}
-			// A versionless candidate must not resurrect a CVE that a
-			// versioned candidate already range-rejected. A versioned
-			// candidate with a DIFFERENT version string (the synthesized
-			// CPE carries the normalized input version; an explicit CPE
-			// may carry nmap's upstream-only one) is judged on its own
-			// version — a miss by one candidate version is not a miss by
-			// every candidate version.
-			if rangeMiss[id] && c.Version == "" {
-				seen[id] = true
-				continue
-			}
-			seen[id] = true
-			vuln, err := m.Index.CVE(ctx, id)
-			if err != nil || vuln == nil || vuln.State == domain.CVEStateRejected {
-				continue
-			}
-			mt, conf, reason, ev := evaluateCPE(vuln, c, in)
+		}
+	}
+	if len(cands) == 0 {
+		return nil, false, nil
+	}
+
+	// Batch-load candidate records — one round-trip set per chunk, not an
+	// N+1 CVE+CPES query pair per candidate.
+	vulns, err := m.Index.CVEs(ctx, cands)
+	if err != nil {
+		return nil, false, err
+	}
+
+	out := make([]Match, 0, len(cands))
+	for _, id := range cands {
+		vuln := vulns[id]
+		if vuln == nil || vuln.State == domain.CVEStateRejected {
+			continue
+		}
+		// Per-CVE best evaluation: every identity is judged; the strongest
+		// verdict wins (exact > range > potential). A versioned identity
+		// whose version statements rejected the observed version marks the
+		// CVE range-rejected: potential-grade verdicts from weaker
+		// (versionless) identities must not resurrect it — the vendor made
+		// a version statement and the known observed version does not fit.
+		best := Match{CVEID: id}
+		bestRank, bestAuth := 0, 0
+		versionRejected := false
+		for _, ident := range identities {
+			mt, conf, reason, ev, rejected := evaluateCPE(vuln, ident.cpe, in)
 			if mt == "" {
-				if in.Version != "" && vulnHasVersionBounds(vuln) {
-					rangeMiss[id] = true
+				if rejected {
+					versionRejected = true
 				}
 				continue
 			}
-			out = append(out, Match{CVEID: id, MatchType: mt, Confidence: conf, Reason: reason, Evidence: ev})
-			if len(out) >= max {
-				return out, nil
+			r := matchRank(mt)
+			if ident.authority > bestAuth ||
+				(ident.authority == bestAuth && (r > bestRank || (r == bestRank && conf > best.Confidence))) {
+				best = Match{CVEID: id, MatchType: mt, Confidence: conf, Reason: reason, Evidence: ev}
+				bestRank, bestAuth = r, ident.authority
 			}
 		}
+		if bestRank == 0 {
+			continue
+		}
+		if versionRejected && bestRank <= matchRank(domain.MatchServiceVersion) {
+			continue // potential-only evidence after a version rejection
+		}
+		out = append(out, best)
 	}
-	return out, nil
+
+	// Rank globally and only then apply the caller cap.
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Confidence > out[j].Confidence })
+	truncated := false
+	if len(out) > max {
+		out = out[:max]
+		truncated = true
+	}
+	return out, truncated, nil
 }
 
-// vulnHasVersionBounds reports whether any CPE match of the CVE pins or
-// ranges versions (i.e. the vendor made a version statement at all).
-func vulnHasVersionBounds(vuln *domain.Vulnerability) bool {
-	for _, cm := range vuln.CPEMatches {
-		if cm.Version != "" && cm.Version != "*" && cm.Version != "-" {
-			return true
-		}
-		if hasRange(cm) {
-			return true
-		}
+// matchRank orders verdict strengths: definitive CPE evidence beats
+// potential-grade identity matches.
+func matchRank(mt domain.MatchType) int {
+	switch mt {
+	case domain.MatchExactCPE:
+		return 4
+	case domain.MatchCPERange:
+		return 3
+	case domain.MatchServiceVersion:
+		return 2
+	default:
+		return 1 // heuristic / package-level potentials
 	}
-	return false
 }
 
 // evaluateCPE compares one CVE's CPE expressions with the observed identity.
-func evaluateCPE(vuln *domain.Vulnerability, observed fingerprinting.CPE, in MatchInput) (domain.MatchType, domain.Confidence, string, map[string]any) {
+// Every expression sharing the observed vendor/product is judged and the
+// STRONGEST verdict wins — an expression-order-dependent first verdict used
+// to let a versionless "potential" shadow both a pin/range rejection of the
+// same product and a stronger match in a later expression. The final return
+// value reports that a versioned expression (pin or range) shared the
+// identity and rejected the observed version: callers use it to suppress
+// potential-grade verdicts, never definitive ones.
+func evaluateCPE(vuln *domain.Vulnerability, observed fingerprinting.CPE, in MatchInput) (domain.MatchType, domain.Confidence, string, map[string]any, bool) {
+	best := Match{Confidence: 0}
+	bestRank := 0
+	versionRejected := false
 	for _, cm := range vuln.CPEMatches {
 		cmCPE, ok := fingerprinting.ParseCPE(cm.CPE)
 		if !ok {
@@ -322,6 +403,10 @@ func evaluateCPE(vuln *domain.Vulnerability, observed fingerprinting.CPE, in Mat
 		}
 		ev := map[string]any{"cve": vuln.CVEID, "cpe": cm.CPE, "observed_product": observed.Product, "observed_version": observed.Version}
 
+		var mt domain.MatchType
+		var conf domain.Confidence
+		var reason string
+
 		// Exact pinned version in the CPE match. Observed scanner noise
 		// ("10.0p2 Debian 7") is stripped before comparing with the pin.
 		if cm.Version != "" && cm.Version != "*" && cm.Version != "-" {
@@ -329,19 +414,19 @@ func evaluateCPE(vuln *domain.Vulnerability, observed fingerprinting.CPE, in Mat
 				continue
 			}
 			if versionsEquivalent(cm.Version, observed.Version) {
-				return domain.MatchExactCPE, 0.95, "Exact CPE match " + cm.CPE, ev
+				mt, conf, reason = domain.MatchExactCPE, 0.95, "Exact CPE match "+cm.CPE
+			} else {
+				// The vendor pinned a version and the observed one is not it.
+				versionRejected = true
+				continue
 			}
-			continue
-		}
-
-		// Range expression (start/end bounds from NVD configuration or the
-		// CVE List v5 affected statement; bounds compare under the match's
-		// declared versionType).
-		if hasRange(cm) {
+		} else if hasRange(cm) {
+			// Range expression (start/end bounds from NVD configuration or
+			// the CVE List v5 affected statement; bounds compare under the
+			// match's declared versionType).
 			if observed.Version == "" {
-				return domain.MatchHeuristic, 0.35, "Product in affected range expression but version unknown (potential)", ev
-			}
-			if in, verdict := versionInRange(cm, observed.Version); in {
+				mt, conf, reason = domain.MatchHeuristic, 0.35, "Product in affected range expression but version unknown (potential)"
+			} else if inRange, verdict := versionInRange(cm, observed.Version); inRange {
 				reason := "Version " + observed.Version + " inside affected range " + rangeString(cm)
 				if cm.VersionType != "" {
 					reason += " (" + cm.VersionType + " ordering)"
@@ -354,18 +439,28 @@ func evaluateCPE(vuln *domain.Vulnerability, observed fingerprinting.CPE, in Mat
 						reason += " — installed compared as upstream " + verdict.Projected
 					}
 				}
-				return domain.MatchCPERange, 0.9, reason, ev
+				mt, conf = domain.MatchCPERange, 0.9
+			} else {
+				// The vendor ranged versions and the observed one is outside.
+				versionRejected = true
+				continue
 			}
-			continue
+		} else if observed.Version != "" {
+			// No version info at all in the match: versionless identity match.
+			mt, conf, reason = domain.MatchServiceVersion, 0.6, "Product identity matches; CVE does not pin versions (potential)"
+		} else {
+			mt, conf, reason = domain.MatchHeuristic, 0.3, "Product identity matches but neither side has a version (potential)"
 		}
 
-		// No version info at all in the match: versionless identity match.
-		if observed.Version != "" {
-			return domain.MatchServiceVersion, 0.6, "Product identity matches; CVE does not pin versions (potential)", ev
+		if r := matchRank(mt); r > bestRank || (r == bestRank && conf > best.Confidence) {
+			best = Match{MatchType: mt, Confidence: conf, Reason: reason, Evidence: ev}
+			bestRank = r
 		}
-		return domain.MatchHeuristic, 0.3, "Product identity matches but neither side has a version (potential)", ev
 	}
-	return "", 0, "", nil
+	if bestRank == 0 {
+		return "", 0, "", nil, versionRejected
+	}
+	return best.MatchType, best.Confidence, best.Reason, best.Evidence, versionRejected
 }
 
 // versionsEquivalent reports whether an observed version string equals a

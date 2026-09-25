@@ -217,3 +217,78 @@ func (d *DB) LatestDeviceSample(ctx context.Context, tenantID, agentID string) (
 	}
 	return &s, nil
 }
+
+// MetricAgg is one per-asset aggregate of a metric field over a trailing
+// window — the input of the alert metric evaluator.
+type MetricAgg struct {
+	AssetID string
+	Value   float64
+	Samples int
+}
+
+// metricExpr maps a whitelisted metric field to its SQL expression. Memory
+// is stored as used/total counters; the percent is computed per row and
+// rows without an installed-memory reading are excluded so a missing
+// sensor can never read as 0%.
+var metricExpr = map[string]string{
+	"cpu_percent":      "cpu_percent",
+	"rx_bps":           "rx_bps",
+	"tx_bps":           "tx_bps",
+	"load1":            "load1",
+	"load5":            "load5",
+	"load15":           "load15",
+	"mem_used_percent": "toFloat64(mem_used) / toFloat64(mem_total) * 100",
+}
+
+// metricAggFunc maps a whitelisted aggregation to its ClickHouse function.
+var metricAggFunc = map[string]string{
+	"avg":   "avg",
+	"min":   "min",
+	"max":   "max",
+	"p95":   "quantile(0.95)",
+	"sum":   "sum",
+	"count": "count()",
+}
+
+// WindowMetricAggregates returns the aggregate of one metric field per
+// asset over the trailing window ending at to, org-scoped. Only assets
+// that reported at least one sample appear — absence from the result set
+// is how the evaluator sees "no data".
+func (d *DB) WindowMetricAggregates(ctx context.Context, tenantID, field, agg string, window time.Duration) ([]MetricAgg, error) {
+	expr, ok := metricExpr[field]
+	if !ok {
+		return nil, fmt.Errorf("clickhouse: unknown metric field %q", field)
+	}
+	fn, ok := metricAggFunc[agg]
+	if !ok {
+		return nil, fmt.Errorf("clickhouse: unknown metric aggregation %q", agg)
+	}
+	if window <= 0 {
+		window = 5 * time.Minute
+	}
+	memFilter := ""
+	if field == "mem_used_percent" {
+		memFilter = " AND mem_total > 0"
+	}
+	query := fmt.Sprintf(
+		`SELECT toString(asset_id), toFloat64(%s(%s)), count()
+                 FROM device_metrics
+                 WHERE tenant_id = ? AND timestamp >= ? AND timestamp <= ?
+                   AND asset_id != toUUID('00000000-0000-0000-0000-000000000000')%s
+                 GROUP BY asset_id`,
+		fn, expr, memFilter)
+	rows, err := d.conn.Query(ctx, query, mustUUID(tenantID), time.Now().UTC().Add(-window), time.Now().UTC())
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: metric window query: %w", err)
+	}
+	defer rows.Close()
+	var out []MetricAgg
+	for rows.Next() {
+		var a MetricAgg
+		if err := rows.Scan(&a.AssetID, &a.Value, &a.Samples); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}

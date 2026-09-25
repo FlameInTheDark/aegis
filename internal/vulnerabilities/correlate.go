@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FlameInTheDark/aegis/internal/alerting"
 	"github.com/FlameInTheDark/aegis/internal/domain"
 	"github.com/FlameInTheDark/aegis/internal/ids"
 	pg "github.com/FlameInTheDark/aegis/internal/repository/postgres"
@@ -15,7 +16,7 @@ import (
 
 // FindingStore persists findings (implemented by *pg.FindingRepo).
 type FindingStore interface {
-	Upsert(ctx context.Context, f *domain.Finding) error
+	Upsert(ctx context.Context, f *domain.Finding) (bool, error)
 }
 
 // EvidenceStore persists evidence records (implemented by *pg.EvidenceRepo).
@@ -43,6 +44,9 @@ type Correlator struct {
 	// DistroResolver overrides how an asset's distro segment is resolved
 	// (tests). Defaults to fingerprinting.DistroOf.
 	DistroResolver DistroResolver
+	// DB enables finding.created emission into the alert outbox; nil
+	// disables emission.
+	DB *pg.DB
 	// Now is overridable in tests.
 	Now func() time.Time
 }
@@ -73,7 +77,7 @@ func (c *Correlator) CorrelateService(ctx context.Context, orgID string, asset *
 	if in.Product == "" {
 		return 0, nil
 	}
-	matches, err := c.Matcher.Match(ctx, in)
+	matches, _, err := c.Matcher.Match(ctx, in)
 	if err != nil {
 		return 0, err
 	}
@@ -132,7 +136,7 @@ func (c *Correlator) CorrelatePackage(ctx context.Context, orgID string, asset *
 		c.Matcher = &Matcher{Index: c.Index}
 	}
 	in := MatchInput{AssetID: asset.ID, SoftwareID: sw.ID, Ecosystem: sw.Ecosystem, PackageName: sw.Name, Version: matchVersion(sw), RawVersion: sw.Version}
-	matches, err := c.Matcher.Match(ctx, in)
+	matches, _, err := c.Matcher.Match(ctx, in)
 	if err != nil {
 		return 0, err
 	}
@@ -179,7 +183,7 @@ func (c *Correlator) CorrelateSoftware(ctx context.Context, orgID string, asset 
 		c.Matcher = &Matcher{Index: c.Index}
 	}
 	in := MatchInput{AssetID: asset.ID, SoftwareID: sw.ID, Vendor: sw.Vendor, Product: sw.Name, Version: matchVersion(sw), RawVersion: sw.Version, CPEs: sw.CPEs}
-	matches, err := c.Matcher.Match(ctx, in)
+	matches, _, err := c.Matcher.Match(ctx, in)
 	if err != nil {
 		return 0, err
 	}
@@ -379,8 +383,20 @@ func (c *Correlator) upsertFinding(ctx context.Context, orgID string, asset *dom
 		FirstSeen:   c.now(), LastSeen: c.now(),
 		CreatedAt: c.now(), UpdatedAt: c.now(),
 	}
-	if err := c.Findings.Upsert(ctx, f); err != nil {
+	created, err := c.Findings.Upsert(ctx, f)
+	if err != nil {
 		return false, err
+	}
+	if created && c.DB != nil {
+		// Reliable transition: only a genuinely new finding emits the
+		// event — a refresh (created=false) stays silent so rescans never
+		// storm finding triggers.
+		kev := vuln != nil && vuln.KnownExploited != nil && vuln.KnownExploited.KnownExploited
+		var epss float64
+		if vuln != nil && vuln.EPSS != nil {
+			epss = vuln.EPSS.EPSS
+		}
+		_ = alerting.EmitFindingCreated(ctx, c.DB, orgID, asset.SiteID, asset.ID, f.ID, cveID, string(sev), kev, epss)
 	}
 
 	// Evidence chain: structured, not just a sentence.
@@ -403,7 +419,7 @@ func (c *Correlator) upsertFinding(ctx context.Context, orgID string, asset *dom
 	// Explanation requirement: store a transparent reason on the asset
 	// risk roll-up happens in the worker; here we log for ops.
 	c.Log.Debug("finding scored", "cve", cveID, "risk", rr.Score, "explain", risk.Explain(rr))
-	return true, nil
+	return created, nil
 }
 
 func firstNonEmptyStr(vals ...string) string {

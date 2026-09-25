@@ -29,6 +29,12 @@ const (
 	SubDetectionMatch  = "security.detection.match.v1"
 	SubFeedSync        = "security.feed.sync.v1"
 
+	// Dedicated domain-event stream for the alert-trigger engine. It is
+	// deliberately separate from the mixed streams above: existing
+	// consumers register without a subject filter and would ACK messages
+	// they cannot parse, so alert events must not share their subjects.
+	SubAlertEvent = "security.alert.event.v1"
+
 	// Realtime streaming subjects (core NATS, deliberately NOT part of any
 	// JetStream stream): job logs and scan state are persisted by the server
 	// itself, notifications are ephemeral. Every subscriber receives every
@@ -48,6 +54,7 @@ const (
 	StreamEvents = "SECURITY_EVENTS"
 	StreamAgents = "SECURITY_AGENTS"
 	StreamFeeds  = "SECURITY_FEEDS"
+	StreamAlerts = "ALERT_EVENTS"
 )
 
 // Bus is the NATS JetStream client wrapper. Delivery is at-least-once;
@@ -93,6 +100,8 @@ func (b *Bus) declareStreams(ctx context.Context) error {
 		{Name: StreamAgents, Subjects: []string{SubAgentRegistered}, Retention: jetstream.LimitsPolicy},
 		{Name: StreamFeeds, Subjects: []string{SubFeedSync, SubVulnMatch,
 			SubFindingCreated, SubFindingUpdated}, Retention: jetstream.WorkQueuePolicy},
+		{Name: StreamAlerts, Subjects: []string{SubAlertEvent},
+			Retention: jetstream.InterestPolicy, MaxAge: 24 * time.Hour},
 	}
 	for _, cfg := range streams {
 		if _, err := b.js.CreateOrUpdateStream(ctx, cfg); err != nil {
@@ -154,14 +163,25 @@ func (b *Bus) BroadcastSub(subject, queueGroup string, handler func(data []byte)
 // Subscribe creates a durable pull consumer and starts a handler loop.
 // The handler must be idempotent (at-least-once delivery).
 func (b *Bus) Subscribe(ctx context.Context, stream, durable string, handler func(msg jetstream.Msg) error) error {
-	c, err := b.js.CreateOrUpdateConsumer(ctx, stream, jetstream.ConsumerConfig{
+	return b.SubscribeFiltered(ctx, stream, durable, "", handler)
+}
+
+// SubscribeFiltered creates a durable pull consumer restricted to one
+// subject. Explicit filtering matters: unfiltered consumers on multi-
+// subject streams receive (and must ACK) messages they cannot parse.
+func (b *Bus) SubscribeFiltered(ctx context.Context, stream, durable, filterSubject string, handler func(msg jetstream.Msg) error) error {
+	cfg := jetstream.ConsumerConfig{
 		Durable:       durable,
 		AckPolicy:     jetstream.AckExplicitPolicy,
 		DeliverPolicy: jetstream.DeliverAllPolicy,
 		MaxDeliver:    10,
 		AckWait:       30 * time.Second,
 		MaxAckPending: 256,
-	})
+	}
+	if filterSubject != "" {
+		cfg.FilterSubject = filterSubject
+	}
+	c, err := b.js.CreateOrUpdateConsumer(ctx, stream, cfg)
 	if err != nil {
 		return fmt.Errorf("nats: consumer %s: %w", durable, err)
 	}

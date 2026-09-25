@@ -13,6 +13,7 @@ import (
 
 	connectorv1 "github.com/FlameInTheDark/aegis/api/gen/aegis/connector/v1"
 	"github.com/FlameInTheDark/aegis/internal/agents"
+	"github.com/FlameInTheDark/aegis/internal/alerting"
 	"github.com/FlameInTheDark/aegis/internal/connectors"
 	"github.com/FlameInTheDark/aegis/internal/domain"
 	"google.golang.org/grpc"
@@ -216,6 +217,12 @@ func (s *ConnectorServer) BindDevice(ctx context.Context, req *connectorv1.BindD
 	if err != nil {
 		s.Deps.Log.Warn("device bind rejected", "connector", c.ID, "err", err)
 		return nil, status.Error(codes.PermissionDenied, err.Error())
+	}
+	if s.Deps.Agents.DB != nil {
+		// Reliable transition: a device is now bound to this connection.
+		// The asset link may not exist yet (inventory application follows);
+		// the event keys on the agent id.
+		_ = alerting.EmitDeviceBound(ctx, s.Deps.Agents.DB, binding.OrgID, binding.SiteID, "", binding.AgentID)
 	}
 	return &connectorv1.BindDeviceResponse{
 		AgentId:               binding.AgentID,

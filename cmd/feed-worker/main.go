@@ -120,6 +120,7 @@ func run() error {
 	runner := &feeds.Runner{
 		Repo: feedsRepo, Vulns: vulns, Store: store, Log: log,
 		Jobs: jobs,
+		DB:   db,
 	}
 
 	// Register sources with license attribution.

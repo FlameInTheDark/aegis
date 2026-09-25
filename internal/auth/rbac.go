@@ -73,7 +73,7 @@ var rolePermissions = map[domain.Role][]domain.Permission{
 		domain.PermFindingRead, domain.PermFindingWrite, domain.PermVulnRead,
 		domain.PermEventRead, domain.PermDetectionManage, domain.PermReportCreate,
 		domain.PermReportRead, domain.PermAuditRead, domain.PermSettingsManage,
-		domain.PermFeedManage,
+		domain.PermFeedManage, domain.PermAlertRead, domain.PermAlertManage,
 	},
 	domain.RoleAdministrator: {
 		domain.PermUserManage, domain.PermSiteManage, domain.PermAssetRead,
@@ -82,21 +82,23 @@ var rolePermissions = map[domain.Role][]domain.Permission{
 		domain.PermFindingWrite, domain.PermVulnRead, domain.PermEventRead,
 		domain.PermDetectionManage, domain.PermReportCreate, domain.PermReportRead,
 		domain.PermAuditRead, domain.PermSettingsManage, domain.PermFeedManage,
+		domain.PermAlertRead, domain.PermAlertManage,
 	},
 	domain.RoleSecurityAnalyst: {
 		domain.PermAssetRead, domain.PermAssetWrite, domain.PermScanCreate,
 		domain.PermScanCancel, domain.PermFindingRead, domain.PermFindingWrite,
 		domain.PermVulnRead, domain.PermEventRead, domain.PermDetectionManage,
 		domain.PermReportCreate, domain.PermReportRead, domain.PermAuditRead,
+		domain.PermAlertRead, domain.PermAlertManage,
 	},
 	domain.RoleOperator: {
 		domain.PermAssetRead, domain.PermScanCreate, domain.PermScanCancel,
 		domain.PermFindingRead, domain.PermVulnRead, domain.PermEventRead,
-		domain.PermReportRead,
+		domain.PermReportRead, domain.PermAlertRead,
 	},
 	domain.RoleViewer: {
 		domain.PermAssetRead, domain.PermFindingRead, domain.PermVulnRead,
-		domain.PermEventRead, domain.PermReportRead,
+		domain.PermEventRead, domain.PermReportRead, domain.PermAlertRead,
 	},
 }
 

@@ -73,15 +73,34 @@ func enabledFunctions(kind string, settings map[string]any) []string {
 }
 
 // functionRole builds the single-function role for fn. A package variable
-// so tests can substitute fake function loops.
-var functionRole = func(fn string, log *slog.Logger, cfg *LocalConfig) (Role, error) {
-	switch fn {
-	case FnAgent:
-		return &AgentRole{log: log, started: time.Now(), cfg: cfg}, nil
-	case FnScanner:
-		return &ScannerRole{log: log, started: time.Now(), tools: detectScanTools(), cfg: cfg}, nil
-	default:
-		return nil, fmt.Errorf("unknown function %q", fn)
+// so tests can substitute fake function loops. Access is guarded by
+// functionRoleMu: reconcile runs on a goroutine that may still be starting
+// loops when a test restores the hook (detected by -race).
+var (
+	functionRoleMu sync.RWMutex
+	functionRole   = func(fn string, log *slog.Logger, cfg *LocalConfig) (Role, error) {
+		switch fn {
+		case FnAgent:
+			return &AgentRole{log: log, started: time.Now(), cfg: cfg}, nil
+		case FnScanner:
+			return &ScannerRole{log: log, started: time.Now(), tools: detectScanTools(), cfg: cfg}, nil
+		default:
+			return nil, fmt.Errorf("unknown function %q", fn)
+		}
+	}
+)
+
+// setFunctionRole atomically swaps the function hook and returns a restore
+// func (tests wire it into t.Cleanup).
+func setFunctionRole(f func(string, *slog.Logger, *LocalConfig) (Role, error)) (restore func()) {
+	functionRoleMu.Lock()
+	prev := functionRole
+	functionRole = f
+	functionRoleMu.Unlock()
+	return func() {
+		functionRoleMu.Lock()
+		functionRole = prev
+		functionRoleMu.Unlock()
 	}
 }
 
@@ -231,7 +250,9 @@ func (r *HybridRole) reconcile(ctx context.Context) {
 		r.log.Info("function disabled; loop stopped", "function", sub.fn)
 	}
 	for _, fn := range starts {
+		functionRoleMu.RLock()
 		role, err := functionRole(fn, r.log, r.cfg)
+		functionRoleMu.RUnlock()
 		if err != nil {
 			r.log.Error("cannot start function", "function", fn, "err", err)
 			continue

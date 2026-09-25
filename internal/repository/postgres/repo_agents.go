@@ -307,3 +307,33 @@ func (r *AgentEventRepo) ListForAgent(ctx context.Context, agentID string, limit
 	}
 	return out, rows.Err()
 }
+
+// AgentOffline describes one device that just transitioned to offline.
+type AgentOffline struct {
+	ID      string
+	OrgID   string
+	SiteID  string
+	AssetID string
+}
+
+// MarkOfflineReturning flips stale agents to offline and returns exactly
+// the rows it transitioned, so the liveness sweep can emit one
+// agent.state_changed event per device (re-running the sweep emits nothing).
+func (r *AgentRepo) MarkOfflineReturning(ctx context.Context, staleBefore time.Time) ([]AgentOffline, error) {
+	rows, err := r.db.Pool.Query(ctx, `UPDATE agents SET status = 'offline'
+		WHERE last_seen < $1 AND status <> 'offline'
+		RETURNING id, organization_id, COALESCE(site_id::text,''), COALESCE(asset_id::text,'')`, staleBefore)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AgentOffline
+	for rows.Next() {
+		var a AgentOffline
+		if err := rows.Scan(&a.ID, &a.OrgID, &a.SiteID, &a.AssetID); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}

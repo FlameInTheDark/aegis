@@ -104,7 +104,7 @@ func (r *ReportDetailRepo) Device(ctx context.Context, orgID, assetID string) (*
 	if err != nil {
 		return nil, fmt.Errorf("load device software: %w", err)
 	}
-	out.Findings, err = reportRows(ctx, r.db, r.db.Select(findingCols).From("findings f").Where(squirrel.Eq{"f.organization_id": orgID, "f.asset_id": assetID}).OrderBy("f.id"), scanFinding)
+	out.Findings, err = reportRows(ctx, r.db, r.db.Select(findingCols).From("findings f"+findingJoins).Where(squirrel.Eq{"f.organization_id": orgID, "f.asset_id": assetID}).OrderBy("f.id"), scanFinding)
 	if err != nil {
 		return nil, fmt.Errorf("load device findings: %w", err)
 	}

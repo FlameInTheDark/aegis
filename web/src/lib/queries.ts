@@ -188,6 +188,7 @@ export function mapFinding(f: A.Finding): Finding {
     confidence: pct(f.confidence), riskScore: num(f.risk_score),
     remediation: f.remediation || undefined, notes: f.notes || undefined,
     firstSeen: f.first_seen, lastSeen: f.last_seen, assignee: f.owner || undefined,
+    product: f.product || undefined, version: f.version || undefined,
   };
 }
 

@@ -34,10 +34,10 @@ type fakeFindingStore struct {
 	findings []*domain.Finding
 }
 
-func (f *fakeFindingStore) Upsert(ctx context.Context, fnd *domain.Finding) error {
+func (f *fakeFindingStore) Upsert(ctx context.Context, fnd *domain.Finding) (bool, error) {
 	f.upserts++
 	f.findings = append(f.findings, fnd)
-	return nil
+	return true, nil
 }
 
 type fakeEvidenceStore struct {

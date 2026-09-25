@@ -62,16 +62,25 @@ func NewFindingRepo(db *DB) *FindingRepo { return &FindingRepo{db: db} }
 // site filter is present, and unqualified columns like bare `id` made that
 // query fail with SQLSTATE 42702 ("column reference \"id\" is ambiguous") —
 // which broke report generation for any site-scoped report definition.
+// findingJoins resolves the product/version presentation fields from the
+// linked inventory rows (software name/version, or the service's product
+// and detected version); LEFT JOINs, so findings without an inventory link
+// scan empty strings and the row count never changes.
 const findingCols = `f.id, f.organization_id, f.asset_id::text, f.service_id::text, f.software_id::text,
 COALESCE(f.cve_id,'') AS cve_id, COALESCE(f.osv_id,'') AS osv_id, f.title, f.match_type, f.confidence, f.risk_score, f.severity, f.status, f.owner, f.notes,
-f.remediation, f.suppressed_until, f.first_seen, f.last_seen, f.resolved_at, f.created_at, f.updated_at`
+f.remediation, f.suppressed_until, f.first_seen, f.last_seen, f.resolved_at, f.created_at, f.updated_at,
+COALESCE(NULLIF(sw.name, ''), NULLIF(svc.product, ''), '') AS product,
+COALESCE(NULLIF(sw.version, ''), NULLIF(svc.detected_version, ''), '') AS version`
+
+const findingJoins = ` LEFT JOIN services svc ON svc.id = f.service_id LEFT JOIN software sw ON sw.id = f.software_id`
 
 func scanFinding(row scanner) (*domain.Finding, error) {
 	var f domain.Finding
 	err := row.Scan(&f.ID, &f.OrganizationID, &f.AssetID, &f.ServiceID, &f.SoftwareID,
 		&f.CVEID, &f.OSVID, &f.Title, &f.MatchType, &f.Confidence, &f.RiskScore,
 		&f.Severity, &f.Status, &f.Owner, &f.Notes, &f.Remediation, &f.SuppressedUntil,
-		&f.FirstSeen, &f.LastSeen, &f.ResolvedAt, &f.CreatedAt, &f.UpdatedAt)
+		&f.FirstSeen, &f.LastSeen, &f.ResolvedAt, &f.CreatedAt, &f.UpdatedAt,
+		&f.Product, &f.Version)
 	if err != nil {
 		return nil, mapNotFound(err)
 	}
@@ -79,7 +88,14 @@ func scanFinding(row scanner) (*domain.Finding, error) {
 }
 
 // Upsert creates or refreshes a finding; first_seen is preserved.
-func (r *FindingRepo) Upsert(ctx context.Context, f *domain.Finding) error {
+// Upsert inserts the finding or refreshes the existing one (same
+// asset/CVE/service conflict key). The bool result distinguishes a real
+// INSERT from a refresh — "new finding" counts and finding.created events
+// need the difference, and the old signature reported every refresh as a
+// creation. xmax=0 is PostgreSQL's insert-vs-update discriminator inside
+// RETURNING: a tuple inserted by this statement has xmax 0, an updated
+// existing one carries its locking xid.
+func (r *FindingRepo) Upsert(ctx context.Context, f *domain.Finding) (bool, error) {
 	if f.ID == "" {
 		f.ID = ids.New()
 	}
@@ -105,13 +121,17 @@ func (r *FindingRepo) Upsert(ctx context.Context, f *domain.Finding) error {
                         -- a re-observed finding reopens resolved ones
                         status = CASE WHEN findings.status = 'resolved' THEN 'open' ELSE findings.status END,
                         resolved_at = CASE WHEN findings.status = 'resolved' THEN NULL ELSE findings.resolved_at END
-                        RETURNING id, first_seen`)
-	return r.db.QueryRow(ctx, q).Scan(&f.ID, &f.FirstSeen)
+                        RETURNING id, first_seen, (xmax = 0) AS inserted`)
+	var created bool
+	if err := r.db.QueryRow(ctx, q).Scan(&f.ID, &f.FirstSeen, &created); err != nil {
+		return false, err
+	}
+	return created, nil
 }
 
 func (r *FindingRepo) ByID(ctx context.Context, orgID, id string) (*domain.Finding, error) {
-	q := r.db.Select(findingCols).From("findings f").
-		Where(squirrel.Eq{"id": id, "organization_id": orgID})
+	q := r.db.Select(findingCols).From("findings f" + findingJoins).
+		Where(squirrel.Eq{"f.id": id, "f.organization_id": orgID})
 	return scanFinding(r.db.QueryRow(ctx, q))
 }
 
@@ -175,7 +195,7 @@ func (r *FindingRepo) List(ctx context.Context, f FindingFilter) ([]domain.Findi
 		return nil, 0, err
 	}
 
-	q := r.db.Select(findingCols).From("findings f" + join).Where(fullWhere)
+	q := r.db.Select(findingCols).From("findings f" + findingJoins + join).Where(fullWhere)
 	rows, err := r.db.Query(ctx, q.OrderBy("f.risk_score DESC, f.first_seen DESC").
 		Limit(uint64(f.Limit)).Offset(uint64((f.Page-1)*f.Limit)))
 	if err != nil {
@@ -249,10 +269,10 @@ func (r *FindingRepo) SetOwner(ctx context.Context, orgID, id, owner string) err
 
 // ListForAsset returns open findings of an asset.
 func (r *FindingRepo) ListForAsset(ctx context.Context, assetID string) ([]domain.Finding, error) {
-	q := r.db.Select(findingCols).From("findings f").
-		Where(squirrel.Eq{"asset_id": assetID}).
-		Where(squirrel.NotEq{"status": domain.FindingResolved}).
-		OrderBy("risk_score DESC")
+	q := r.db.Select(findingCols).From("findings f" + findingJoins).
+		Where(squirrel.Eq{"f.asset_id": assetID}).
+		Where(squirrel.NotEq{"f.status": domain.FindingResolved}).
+		OrderBy("f.risk_score DESC")
 	rows, err := r.db.Query(ctx, q)
 	if err != nil {
 		return nil, err
@@ -271,9 +291,9 @@ func (r *FindingRepo) ListForAsset(ctx context.Context, assetID string) ([]domai
 
 // ListForCVE returns findings for a CVE across the org.
 func (r *FindingRepo) ListForCVE(ctx context.Context, orgID, cveID string) ([]domain.Finding, error) {
-	q := r.db.Select(findingCols).From("findings f").
-		Where(squirrel.Eq{"organization_id": orgID, "cve_id": cveID}).
-		OrderBy("risk_score DESC")
+	q := r.db.Select(findingCols).From("findings f" + findingJoins).
+		Where(squirrel.Eq{"f.organization_id": orgID, "f.cve_id": cveID}).
+		OrderBy("f.risk_score DESC")
 	rows, err := r.db.Query(ctx, q)
 	if err != nil {
 		return nil, err

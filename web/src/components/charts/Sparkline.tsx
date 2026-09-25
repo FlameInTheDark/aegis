@@ -35,7 +35,8 @@ export function Sparkline({ rx, tx, height = 34, width = 150, loading }: {
     }
   }, [loading])
 
-  // Data updates morph the live series like the big charts do.
+  // Data updates redraw instantly — animation is disabled in the option so
+  // a refreshed tail snaps to its new position instead of morphing in place.
   useEffect(() => {
     chartRef.current?.setOption(option(rx, tx))
   }, [rx, tx])
@@ -46,6 +47,9 @@ export function Sparkline({ rx, tx, height = 34, width = 150, loading }: {
 function option(rx: number[], tx: number[]): echarts.EChartsOption {
   return {
     backgroundColor: 'transparent',
+    // Polling tail: no animation, so new samples push the line left instead
+    // of the series morphing between values.
+    animation: false,
     grid: { left: 2, right: 2, top: 3, bottom: 3 },
     tooltip: {
       show: rx.length + tx.length > 0,

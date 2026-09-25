@@ -48,6 +48,8 @@ const (
 	PermAuditRead       Permission = "audit:read"
 	PermSettingsManage  Permission = "settings:manage"
 	PermFeedManage      Permission = "feed:manage"
+	PermAlertRead       Permission = "alert:read"
+	PermAlertManage     Permission = "alert:manage"
 )
 
 // User is a human operator of the platform.

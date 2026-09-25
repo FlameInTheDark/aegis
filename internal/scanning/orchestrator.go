@@ -253,7 +253,7 @@ func (o *Orchestrator) ApplyObservation(ctx context.Context, obs *domain.Observa
 			_ = o.Assets.TouchSeen(ctx, a.ID)
 		}
 		if dt, _ := obs.Normalized["device_type"].(string); dt != "" {
-			o.Inventory.RecordDevice(ctx, obs.ScanID, obs.SiteID, a.ID, domain.DeviceType(dt), obs.Confidence, string(obs.Source))
+			o.Inventory.RecordDevice(ctx, obs.OrganizationID, obs.ScanID, obs.SiteID, a.ID, domain.DeviceType(dt), obs.Confidence, string(obs.Source))
 		}
 		// Type-assert BEFORE comparing: a missing key returns nil (any),
 		// and `nil != ""` is true — the guard would pass on every
@@ -264,7 +264,7 @@ func (o *Orchestrator) ApplyObservation(ctx context.Context, obs *domain.Observa
 		osName, _ := obs.Normalized["os_name"].(string)
 		if fam != "" || osName != "" {
 			ver, _ := obs.Normalized["os_version"].(string)
-			o.Inventory.RecordOS(ctx, obs.ScanID, obs.SiteID, a.ID, fam, osName, ver, obs.Confidence, string(obs.Source))
+			o.Inventory.RecordOS(ctx, obs.OrganizationID, obs.ScanID, obs.SiteID, a.ID, fam, osName, ver, obs.Confidence, string(obs.Source))
 		}
 	case "port_open":
 		a, err := o.assetForTarget(ctx, obs)
@@ -363,7 +363,7 @@ func (o *Orchestrator) ApplyObservation(ctx context.Context, obs *domain.Observa
 			}
 		}
 		if fam != "" || name != "" {
-			o.Inventory.RecordOS(ctx, obs.ScanID, obs.SiteID, a.ID, fam, name, "", 0.5, string(obs.Source))
+			o.Inventory.RecordOS(ctx, obs.OrganizationID, obs.ScanID, obs.SiteID, a.ID, fam, name, "", 0.5, string(obs.Source))
 		}
 		// Device-type hints from service fingerprints. Deliberately
 		// conservative mappings and a low 0.55 confidence: a JetDirect
@@ -371,7 +371,7 @@ func (o *Orchestrator) ApplyObservation(ctx context.Context, obs *domain.Observa
 		// likely a camera, NAS brand names are self-describing — but
 		// any -O osclass or stronger later classification must win.
 		if dt := deviceHintFromService(strOf(obs.Normalized["service"]), strOf(obs.Normalized["product"]), svc.CPEs); dt != "" {
-			o.Inventory.RecordDevice(ctx, obs.ScanID, obs.SiteID, a.ID, domain.DeviceType(dt), 0.55, string(obs.Source))
+			o.Inventory.RecordDevice(ctx, obs.OrganizationID, obs.ScanID, obs.SiteID, a.ID, domain.DeviceType(dt), 0.55, string(obs.Source))
 		}
 		// Software bridge: a -sV fingerprint (product/version/CPE) is the
 		// network view of "what is installed behind the port". Persist it

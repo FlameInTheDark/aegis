@@ -44,7 +44,7 @@ func osvUpstreamBoundIndex() *fakeIndex {
 // would call the package "newer" than every upstream bound).
 func TestOSVUpstreamBoundMatchesPackagedOpenSSH(t *testing.T) {
 	m := &Matcher{Index: osvUpstreamBoundIndex()}
-	matches, err := m.Match(context.Background(), MatchInput{
+	matches, _, err := m.Match(context.Background(), MatchInput{
 		Ecosystem:   fingerprinting.PkgEcoDebian,
 		PackageName: "openssh-server",
 		Version:     "1:10.0p1-5ubuntu5.4", // normalized installed version
@@ -81,7 +81,7 @@ func TestOSVUpstreamBoundMatchesPackagedOpenSSH(t *testing.T) {
 
 	// Fixed upstream release: 10.5 == bound, and 10.6 > bound — no match.
 	for _, fixed := range []string{"1:10.5-0ubuntu1", "1:10.6-0ubuntu1.1"} {
-		matches, _ := m.Match(context.Background(), MatchInput{
+		matches, _, _ := m.Match(context.Background(), MatchInput{
 			Ecosystem: fingerprinting.PkgEcoDebian, PackageName: "openssh-server", Version: fixed,
 		})
 		for _, mt := range matches {
@@ -92,7 +92,7 @@ func TestOSVUpstreamBoundMatchesPackagedOpenSSH(t *testing.T) {
 	}
 
 	// Update levels stay ordered inside the same base: 10.0p2 also matches.
-	matches, _ = m.Match(context.Background(), MatchInput{
+	matches, _, _ = m.Match(context.Background(), MatchInput{
 		Ecosystem: fingerprinting.PkgEcoDebian, PackageName: "openssh-server", Version: "1:10.0p2-5ubuntu5.1",
 	})
 	if len(matches) == 0 {
@@ -106,7 +106,7 @@ func TestOSVUpstreamBoundMatchesPackagedOpenSSH(t *testing.T) {
 func TestOSVDistroBoundStillDebianOrdered(t *testing.T) {
 	m := &Matcher{Index: osvUpstreamBoundIndex()}
 
-	matches, err := m.Match(context.Background(), MatchInput{
+	matches, _, err := m.Match(context.Background(), MatchInput{
 		Ecosystem: fingerprinting.PkgEcoDebian, PackageName: "openssh-server",
 		Version: "1:10.0p1-5ubuntu5.4", // one revision below the fix
 	})
@@ -130,7 +130,7 @@ func TestOSVDistroBoundStillDebianOrdered(t *testing.T) {
 	}
 
 	// Same upstream, security revision applied: fixed.
-	matches, _ = m.Match(context.Background(), MatchInput{
+	matches, _, _ = m.Match(context.Background(), MatchInput{
 		Ecosystem: fingerprinting.PkgEcoDebian, PackageName: "openssh-server",
 		Version: "1:10.0p1-5ubuntu5.6", // above 1:10.0p1-5ubuntu5.5
 	})
@@ -159,7 +159,7 @@ func TestCPERangeOpenSSHStructuredDomain(t *testing.T) {
 
 	affected := []string{"10.0p2", "10.0p1", "10.4p2", "9.9p2", "10.0p2-5ubuntu5.4"}
 	for _, v := range affected {
-		matches, err := m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: v})
+		matches, _, err := m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: v})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -174,14 +174,14 @@ func TestCPERangeOpenSSHStructuredDomain(t *testing.T) {
 
 	fixed := []string{"10.5", "10.5p1", "10.6", "11.0"}
 	for _, v := range fixed {
-		matches, _ := m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: v})
+		matches, _, _ := m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: v})
 		if len(matches) != 0 {
 			t.Errorf("%s is outside (< 10.5) and must not match, got %+v", v, matches)
 		}
 	}
 
 	// The banner-normalized deb form must carry the projection evidence.
-	matches, _ := m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: "10.0p2-5ubuntu5.4"})
+	matches, _, _ := m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: "10.0p2-5ubuntu5.4"})
 	if len(matches) == 1 && matches[0].Evidence["projected_version"] != "10.0p2" {
 		t.Errorf("projected_version = %v, want 10.0p2", matches[0].Evidence["projected_version"])
 	}
@@ -201,15 +201,15 @@ func TestCPERangeStartExclStillEvaluated(t *testing.T) {
 	m := &Matcher{Index: idx}
 
 	// Exactly at the exclusive start: outside.
-	if matches, _ := m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: "10.0"}); len(matches) != 0 {
+	if matches, _, _ := m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: "10.0"}); len(matches) != 0 {
 		t.Errorf("10.0 is excluded by versionStartExcl, got %+v", matches)
 	}
 	// One update above the start, inside the inclusive end: in range.
-	if matches, _ := m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: "10.0p1"}); len(matches) != 1 {
+	if matches, _, _ := m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: "10.0p1"}); len(matches) != 1 {
 		t.Errorf("10.0p1 is inside (10.0, 10.4], got %+v", matches)
 	}
 	// Above the inclusive end: outside — 10.4p1 > 10.4.
-	if matches, _ := m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: "10.4p1"}); len(matches) != 0 {
+	if matches, _, _ := m.Match(context.Background(), MatchInput{Vendor: "OpenBSD", Product: "OpenSSH", Version: "10.4p1"}); len(matches) != 0 {
 		t.Errorf("10.4p1 is outside (10.0, 10.4], got %+v", matches)
 	}
 }

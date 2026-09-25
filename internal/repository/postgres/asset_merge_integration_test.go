@@ -164,7 +164,7 @@ func TestIntegrationAssetMerge(t *testing.T) {
 	// Identifiers merged: the duplicate's hostname and both addresses now
 	// resolve to the target.
 	for _, pair := range [][2]string{{"hostname", "desktop-rufjn45"}, {"ip", "192.168.1.80"}, {"ip", "10.8.0.2"}} {
-		holders, err := ident.FindByIdentifier(ctx, pair[0], pair[1])
+		holders, err := ident.FindByIdentifier(ctx, org.ID, pair[0], pair[1])
 		if err != nil {
 			t.Fatalf("find %s/%s: %v", pair[0], pair[1], err)
 		}

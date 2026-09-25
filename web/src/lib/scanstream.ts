@@ -239,7 +239,17 @@ export function useNotificationStream() {
           description: n.body,
           variant: variantFor(n.severity),
         });
-        if (n.type === "findings.created") {
+        // Alert lifecycle hints from the trigger engine (post-commit):
+      // invalidate the alert caches so lists/details resync via REST.
+      if (n.type === "alert.fired" || n.type === "alert.recovered" || n.type === "alert.repeated") {
+        qc.invalidateQueries({ queryKey: ["alerts-occurrences"] });
+        qc.invalidateQueries({ queryKey: ["alerts-health"] });
+        if (n.ref?.occurrence_id) {
+          qc.invalidateQueries({ queryKey: ["alerts-occurrence", n.ref.occurrence_id] });
+        }
+        qc.invalidateQueries({ queryKey: ["alerts-triggers"] });
+      }
+      if (n.type === "findings.created") {
           // The bell's unread count derives from the match queue.
           qc.invalidateQueries({ queryKey: ["detection-matches"] });
           qc.invalidateQueries({ queryKey: ["findings"] });

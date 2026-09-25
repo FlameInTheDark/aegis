@@ -15,6 +15,7 @@ import { ScansPage } from "@/pages/ScansPage";
 import { VulnerabilitiesPage } from "@/pages/VulnerabilitiesPage";
 import { FindingsPage } from "@/pages/FindingsPage";
 import { DetectionsPage } from "@/pages/DetectionsPage";
+import { AlertsPage } from "@/pages/AlertsPage";
 import { EventsPage } from "@/pages/EventsPage";
 import { ConnectionsPage } from "@/pages/ConnectionsPage";
 import { ReportsPage } from "@/pages/ReportsPage";
@@ -64,6 +65,9 @@ function Routes() {
       break;
     case "detections":
       page = <DetectionsPage />;
+      break;
+    case "alerts":
+      page = <AlertsPage />;
       break;
     case "events":
       page = <EventsPage />;

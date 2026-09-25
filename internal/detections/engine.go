@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FlameInTheDark/aegis/internal/alerting"
 	"github.com/FlameInTheDark/aegis/internal/domain"
 	"github.com/FlameInTheDark/aegis/internal/ids"
 	pg "github.com/FlameInTheDark/aegis/internal/repository/postgres"
@@ -30,6 +31,9 @@ type Engine struct {
 	Log       *slog.Logger
 	// Notifier is invoked for critical matches (webhook alerting).
 	Notifier func(ctx context.Context, m *domain.DetectionMatch)
+	// Outbox emits detection.match.created domain events for the alert
+	// trigger engine; nil disables emission.
+	Outbox *pg.OutboxRepo
 }
 
 // windowDuration parses "60s", "5m", "1h".
@@ -81,6 +85,12 @@ func (e *Engine) Ingest(ctx context.Context, orgID string, events []domain.Event
 		if err := e.Matches.Insert(ctx, &matches[i]); err != nil {
 			e.Log.Warn("match insert failed", "err", err)
 			continue
+		}
+		if e.Outbox != nil {
+			// Durable hint for the alert-trigger engine; emission failure
+			// must never fail the match itself.
+			_ = alerting.EmitDetectionMatchCreated(ctx, e.Outbox.DB(), matches[i].OrgID, matches[i].SiteID, matches[i].AssetID,
+				matches[i].ID, matches[i].RuleTitle, string(matches[i].Level))
 		}
 		if matches[i].Level == domain.SeverityCritical && e.Notifier != nil {
 			e.Notifier(ctx, &matches[i])

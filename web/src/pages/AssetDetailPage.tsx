@@ -1,11 +1,14 @@
 import * as React from "react";
 import {
   ArrowLeft,
+  BellPlus,
   Check,
   ChevronDown,
   Copy,
   Cpu,
   FileText,
+  Gauge,
+  MemoryStick,
   MoreHorizontal,
   Pencil,
   Radar,
@@ -27,6 +30,7 @@ import type {
   AssetIfaceSeries, AssetMetricLatest, AssetMetricPoint, AssetType, Criticality, Trace,
 } from "@/data/types";
 import { fmtBps, fmtBytes } from "@/lib/format";
+import { VulnDiagnosticsSheet } from "@/components/vulns/VulnDiagnosticsSheet";
 import { Chart } from "@/components/charts/Chart";
 import { Sparkline } from "@/components/charts/Sparkline";
 import {
@@ -112,6 +116,7 @@ export function AssetDetailPage({ id }: { id: string }) {
   const [tagsOpen, setTagsOpen] = React.useState(false);
   const [identityOpen, setIdentityOpen] = React.useState(false);
   const [deleteOpen, setDeleteOpen] = React.useState(false);
+  const [diagOpen, setDiagOpen] = React.useState(false);
   // Every hook runs unconditionally — the bundle id may not exist yet, so the
   // detail queries key off empty strings and stay idle until it resolves.
   const siteNetworksQ = useSiteNetworksIsolated(asset?.site);
@@ -663,9 +668,14 @@ export function AssetDetailPage({ id }: { id: string }) {
                         </div>
                       </TableCell>
                       <TableCell className="text-right pr-4">
-                        <Button variant="ghost" size="xs" onClick={() => navigate(`/vulnerabilities?q=${encodeURIComponent(p.product ?? p.service)}`)}>
-                          Search CVEs
-                        </Button>
+                        <div className="flex justify-end gap-1">
+                          <Button variant="ghost" size="xs" onClick={() => setDiagOpen(true)}>
+                            Diagnostics
+                          </Button>
+                          <Button variant="ghost" size="xs" onClick={() => navigate(`/vulnerabilities?q=${encodeURIComponent(p.product ?? p.service)}`)}>
+                            Search CVEs
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))
@@ -724,9 +734,14 @@ export function AssetDetailPage({ id }: { id: string }) {
                         <Badge variant="muted">{s.source ?? "—"}</Badge>
                       </TableCell>
                       <TableCell>
-                        <Button variant="ghost" size="xs" onClick={() => navigate(`/vulnerabilities?q=${encodeURIComponent(s.name)}`)}>
-                          Search CVEs
-                        </Button>
+                        <div className="flex justify-end gap-1">
+                          <Button variant="ghost" size="xs" onClick={() => setDiagOpen(true)}>
+                            Diagnostics
+                          </Button>
+                          <Button variant="ghost" size="xs" onClick={() => navigate(`/vulnerabilities?q=${encodeURIComponent(s.name)}`)}>
+                            Search CVEs
+                          </Button>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))
@@ -824,6 +839,7 @@ export function AssetDetailPage({ id }: { id: string }) {
           <TabsContent value="performance" className="flex flex-col gap-4">
             <AssetPerformance
               assetId={asset.id}
+              assetLabel={asset.hostname ?? asset.ip}
               points={metricsQ.data?.points ?? []}
               latest={metricsQ.data?.latest ?? null}
               ifaces={metricsQ.data?.ifaces ?? []}
@@ -840,6 +856,8 @@ export function AssetDetailPage({ id }: { id: string }) {
           </TabsContent>
         )}
       </Tabs>
+
+      <VulnDiagnosticsSheet assetId={id} open={diagOpen} onClose={() => setDiagOpen(false)} />
 
       <TagsNotesDialog
         open={tagsOpen}
@@ -1456,14 +1474,16 @@ function PerfControls({ perf, onPerf }: { perf: PerfPrefs; onPerf: (p: PerfPrefs
 }
 
 /** RangeTimeline — the visual date picker for range mode. Shows a coarse
- * CPU overview of a fixed context window and a draggable slider window;
- * committing a drag re-queries the charts. The context window (extent) is
- * held stable across commits — it only grows when the selection comes near
- * an edge — so dragging never refetches or rescales the strip (which used
- * to redraw it and visually re-center the selection) and keepPreviousData
- * keeps the strip mounted while any expansion loads. The overview query
- * returns at most ~360 buckets, so the strip stays readable instead of
- * overloading with points. */
+ * CPU/RAM/network overview of a fixed context window and a draggable slider
+ * window; committing a drag re-queries the charts. The context window
+ * (extent) is held stable across commits — it only grows when the selection
+ * comes near an edge — so dragging never refetches or rescales the strip
+ * (which used to redraw it and visually re-center the selection) and
+ * keepPreviousData keeps the strip mounted while any expansion loads. The
+ * overview query returns at most ~360 buckets, so the strip stays readable
+ * instead of overloading with points. RAM rides the left percent axis as
+ * used/total; throughput rides a separate right axis (bytes/s) — one axis
+ * for both scales would flatten the percent lines into noise. */
 function RangeTimeline({ assetId, from, to, onChange }: { assetId: string; from: string; to: string; onChange: (from: string, to: string) => void }) {
   const fromMs = new Date(from).getTime();
   const toMs = new Date(to).getTime();
@@ -1491,6 +1511,10 @@ function RangeTimeline({ assetId, from, to, onChange }: { assetId: string; from:
     }, 400);
   };
   const data = overviewQ.data?.points ?? [];
+  // RAM as a percent of installed memory; null (gap) when a bucket carries
+  // no memory reading, so a missing series never renders as a false 0%.
+  const ramPct = (p: AssetMetricPoint): number | null =>
+    p.mem_total > 0 ? Number(((p.mem_used / p.mem_total) * 100).toFixed(2)) : null;
   return (
     <Card>
       <CardHeader className="pb-0">
@@ -1502,10 +1526,12 @@ function RangeTimeline({ assetId, from, to, onChange }: { assetId: string; from:
           <EmptyState compact icon={Activity} title={overviewQ.isLoading ? "Loading timeline…" : "No samples around this range"} />
         ) : (
           <Chart
-            height={175}
+            height={190}
             onDataZoom={onZoom}
             option={{
-              grid: { left: 44, right: 16, top: 10, bottom: 70 },
+              // Legend row on top and right-axis labels on the side cost
+              // vertical/horizontal room; bottom stays reserved for the slider.
+              grid: { left: 44, right: 56, top: 26, bottom: 70 },
               xAxis: {
                 type: "time",
                 axisLine: { lineStyle: { color: "rgba(255,255,255,0.1)" } },
@@ -1522,13 +1548,40 @@ function RangeTimeline({ assetId, from, to, onChange }: { assetId: string; from:
                   },
                 },
               },
-              yAxis: {
-                type: "value",
-                max: 100,
-                axisLabel: { formatter: "{value}%", color: "#8A8F98", fontSize: 10 },
-                splitLine: { lineStyle: { color: "rgba(255,255,255,0.05)" } },
+              yAxis: [
+                {
+                  type: "value",
+                  max: 100,
+                  axisLabel: { formatter: "{value}%", color: "#8A8F98", fontSize: 10 },
+                  splitLine: { lineStyle: { color: "rgba(255,255,255,0.05)" } },
+                },
+                {
+                  type: "value",
+                  axisLabel: { formatter: (v: number) => fmtBytes(v), color: "#8A8F98", fontSize: 10 },
+                  splitLine: { show: false },
+                  splitNumber: 4,
+                },
+              ],
+              tooltip: {
+                trigger: "axis",
+                // Percent series and byte-rate series share the tooltip; a
+                // single valueFormatter would mislabel one of them.
+                formatter: (params: unknown) => {
+                  const arr = (Array.isArray(params) ? params : [params]) as {
+                    seriesName?: string; marker?: string; value?: unknown; axisValueLabel?: string;
+                  }[];
+                  if (arr.length === 0) return "";
+                  const title = arr[0]?.axisValueLabel ?? "";
+                  const rows = arr.map((p) => {
+                    const raw = Array.isArray(p.value) ? p.value[1] : p.value;
+                    const isBps = p.seriesName === "in" || p.seriesName === "out";
+                    const val = raw === null || raw === undefined ? "—"
+                      : isBps ? fmtBps(Number(raw)) : `${Number(raw).toFixed(1)}%`;
+                    return `${p.marker ?? ""} ${p.seriesName} ${val}`;
+                  });
+                  return [title, ...rows].join("<br/>");
+                },
               },
-              tooltip: { trigger: "axis", valueFormatter: (v) => `${Number(v).toFixed(1)}%` },
               dataZoom: [
                 {
                   type: "slider",
@@ -1558,6 +1611,7 @@ function RangeTimeline({ assetId, from, to, onChange }: { assetId: string; from:
                     new Date(v).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }),
                 },
               ],
+              legend: { top: 0, right: 0, itemWidth: 14, itemHeight: 2, textStyle: { color: "#8A8F98", fontSize: 10 } },
               series: [
                 {
                   name: "cpu",
@@ -1567,6 +1621,32 @@ function RangeTimeline({ assetId, from, to, onChange }: { assetId: string; from:
                   symbol: "none",
                   lineStyle: { color: "#5E6AD2", width: 1.5 },
                   areaStyle: { color: "#5E6AD222" },
+                },
+                {
+                  name: "ram",
+                  type: "line",
+                  data: data.map((p) => [new Date(p.ts).getTime(), ramPct(p)]),
+                  smooth: true,
+                  symbol: "none",
+                  lineStyle: { color: "#60A5FA", width: 1.25 },
+                },
+                {
+                  name: "in",
+                  type: "line",
+                  yAxisIndex: 1,
+                  data: data.map((p) => [new Date(p.ts).getTime(), Number(p.rx_bps.toFixed(1))]),
+                  smooth: true,
+                  symbol: "none",
+                  lineStyle: { color: "#34D399", width: 1.25 },
+                },
+                {
+                  name: "out",
+                  type: "line",
+                  yAxisIndex: 1,
+                  data: data.map((p) => [new Date(p.ts).getTime(), Number(p.tx_bps.toFixed(1))]),
+                  smooth: true,
+                  symbol: "none",
+                  lineStyle: { color: "#FBBF24", width: 1.25 },
                 },
               ],
             }}
@@ -1589,7 +1669,7 @@ function UpdatingDot({ show }: { show: boolean }) {
  *  mode tails a window and refreshes; range mode shows a static span picked
  *  with the timeline. The interface table carries per-NIC sparklines. */
 function AssetPerformance({
-  points, latest, ifaces, loading, fetching, perf, onPerf, effective, assetId,
+  points, latest, ifaces, loading, fetching, perf, onPerf, effective, assetId, assetLabel,
 }: {
   points: AssetMetricPoint[];
   latest: AssetMetricLatest | null;
@@ -1600,6 +1680,7 @@ function AssetPerformance({
   onPerf: (p: PerfPrefs) => void;
   effective: { from: string; to: string; bucket: number; tail: boolean } | null;
   assetId: string;
+  assetLabel: string;
 }) {
   const effFrom = effective?.from || perf.from || points[0]?.ts || "";
   const effTo = effective?.to || perf.to || points[points.length - 1]?.ts || "";
@@ -1619,6 +1700,14 @@ function AssetPerformance({
   // loads (keepPreviousData), so the pulsing dot — not a layout swap — is
   // the only visible change.
   const updating = fetching && !loading;
+  // "Create alert" entry points: deep-link into the Alerts console trigger
+  // editor with a prefilled device-metric draft scoped to this asset.
+  const { navigate } = useRouter();
+  const alertSeed = (metricField: string) => {
+    const p = new URLSearchParams({ tab: "triggers", new: "metric", metric: metricField, asset: assetId });
+    if (assetLabel) p.set("label", assetLabel);
+    navigate(`/alerts?${p.toString()}`);
+  };
   return (
     <>
       <PerfControls perf={perf} onPerf={onPerf} />
@@ -1635,6 +1724,25 @@ function AssetPerformance({
           <CardHeader className="pb-0">
             <CardTitle>Current load</CardTitle>
             <CardDescription>Most recent sample from the endpoint collector</CardDescription>
+            <CardAction>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="outline" size="sm" className="gap-1.5"><BellPlus /> Create alert</Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-64">
+                  <DropdownMenuItem onClick={() => alertSeed("cpu_percent")}>
+                    <Gauge /> CPU utilization above 90%…
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onClick={() => alertSeed("mem_used_percent")}>
+                    <MemoryStick /> Memory usage above 90%…
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => navigate("/alerts?tab=triggers")}>
+                    <BellPlus /> Manage trigger rules…
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </CardAction>
           </CardHeader>
           <CardContent>
             {latest ? (
@@ -1678,6 +1786,7 @@ function AssetPerformance({
             ) : (
               <Chart
                 height={220}
+                live={perf.mode === "latest"}
                 option={{
                   xAxis: { type: "category", boundaryGap: false, data: ts, axisLine: { lineStyle: { color: "rgba(255,255,255,0.1)" } }, axisLabel: { hideOverlap: true } },
                   yAxis: { type: "value", max: 100, axisLabel: { formatter: "{value}%" }, splitLine: { lineStyle: { color: "rgba(255,255,255,0.05)" } } },
@@ -1706,6 +1815,7 @@ function AssetPerformance({
             ) : (
               <Chart
                 height={220}
+                live={perf.mode === "latest"}
                 option={{
                   xAxis: { type: "category", boundaryGap: false, data: ts, axisLine: { lineStyle: { color: "rgba(255,255,255,0.1)" } }, axisLabel: { hideOverlap: true } },
                   yAxis: { type: "value", axisLabel: { formatter: (v: number) => fmtBytes(v) }, splitLine: { lineStyle: { color: "rgba(255,255,255,0.05)" } } },
@@ -1732,6 +1842,7 @@ function AssetPerformance({
             ) : (
               <Chart
                 height={220}
+                live={perf.mode === "latest"}
                 option={{
                   xAxis: { type: "category", boundaryGap: false, data: ts, axisLine: { lineStyle: { color: "rgba(255,255,255,0.1)" } }, axisLabel: { hideOverlap: true } },
                   yAxis: { type: "value", axisLabel: { formatter: (v: number) => fmtBytes(v) }, splitLine: { lineStyle: { color: "rgba(255,255,255,0.05)" } } },

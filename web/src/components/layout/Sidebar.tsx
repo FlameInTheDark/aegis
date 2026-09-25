@@ -1,5 +1,5 @@
 import * as React from "react";
-import { ChevronsUpDown, ChevronLeft, ChevronRight, KeyRound, LogOut, UserRound } from "lucide-react";
+import { ChevronsUpDown, ChevronLeft, ChevronRight, KeyRound, LogOut, UserRound, BellRing} from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 
 import { cn } from "@/lib/utils";
@@ -225,8 +225,8 @@ export function Sidebar({ collapsed, onToggle, counts, user }: { collapsed: bool
                 </Link>
               </DropdownMenuItem>
               <DropdownMenuItem asChild>
-                <Link to="/settings?tab=webhooks">
-                  <KeyRound /> Webhooks &amp; alerts
+                <Link to="/alerts?tab=destinations">
+                  <BellRing /> Alerts &amp; destinations
                 </Link>
               </DropdownMenuItem>
               <DropdownMenuSeparator />

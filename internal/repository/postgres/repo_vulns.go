@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/FlameInTheDark/aegis/internal/domain"
+	"github.com/FlameInTheDark/aegis/internal/fingerprinting"
 	"github.com/FlameInTheDark/aegis/internal/ids"
 )
 
@@ -136,28 +137,147 @@ func (r *VulnRepo) ReplaceCPEMatchesBatch(ctx context.Context, matches map[strin
 	return nil
 }
 
+// CVE loads one record hydrated with CPE matches, EPSS and KEV evidence.
 func (r *VulnRepo) CVE(ctx context.Context, cveID string) (*domain.Vulnerability, error) {
+	m, err := r.CVEs(ctx, []string{cveID})
+	if err != nil {
+		return nil, err
+	}
+	v := m[cveID]
+	if v == nil {
+		return nil, mapNotFound(pgx.ErrNoRows)
+	}
+	return v, nil
+}
+
+// CVEs batch-loads full records — the read path of the matching engine.
+// Candidates used to load one CVE+CPES query pair per candidate (N+1);
+// correlation over a product's candidate set now costs a fixed number of
+// round trips. Every record is hydrated with CPE matches, the latest EPSS
+// snapshot and KEV status: risk scoring reads those fields and the old
+// hydrate-only-when-listed behavior left them empty on the match path.
+func (r *VulnRepo) CVEs(ctx context.Context, cveIDs []string) (map[string]*domain.Vulnerability, error) {
+	out := make(map[string]*domain.Vulnerability, len(cveIDs))
+	const chunk = 200
+	for start := 0; start < len(cveIDs); start += chunk {
+		end := start + chunk
+		if end > len(cveIDs) {
+			end = len(cveIDs)
+		}
+		if err := r.loadCVEChunk(ctx, cveIDs[start:end], out); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func (r *VulnRepo) loadCVEChunk(ctx context.Context, ids []string, out map[string]*domain.Vulnerability) error {
 	q := r.db.Select(`cve_id, state, published_at, updated_at, description,
                 cvss_v2, cvss_v3, cvss_v4, cwe, affected, source, source_record, source_version, ingested_at, raw_ref`).
-		From("vulnerabilities").Where(squirrel.Eq{"cve_id": cveID})
-	var v domain.Vulnerability
-	var affected []byte
-	err := r.db.QueryRow(ctx, q).Scan(&v.CVEID, &v.State, &v.PublishedAt, &v.UpdatedAt,
-		&v.Description, &v.CVSSv2, &v.CVSSv3, &v.CVSSv4, &v.CWE, &affected, &v.Source,
-		&v.SourceRecord, &v.SourceVersion, &v.IngestedAt, &v.RawRef)
+		From("vulnerabilities").Where(squirrel.Eq{"cve_id": ids})
+	rows, err := r.db.Query(ctx, q)
 	if err != nil {
-		return nil, mapNotFound(err)
+		return err
 	}
-	// The matching engine's contract: vuln.CPEMatches carries the CPE
-	// expressions (evaluateCPE iterates them) and vuln.Affected the
-	// vendor applicability statement for the CVE page.
-	if len(affected) > 0 {
-		_ = json.Unmarshal(affected, &v.Affected)
+	var affectedByCve = map[string][]byte{}
+	for rows.Next() {
+		v := &domain.Vulnerability{}
+		var affected []byte
+		if err := rows.Scan(&v.CVEID, &v.State, &v.PublishedAt, &v.UpdatedAt,
+			&v.Description, &v.CVSSv2, &v.CVSSv3, &v.CVSSv4, &v.CWE, &affected, &v.Source,
+			&v.SourceRecord, &v.SourceVersion, &v.IngestedAt, &v.RawRef); err != nil {
+			rows.Close()
+			return err
+		}
+		affectedByCve[v.CVEID] = affected
+		out[v.CVEID] = v
 	}
-	if v.CPEMatches, err = r.CPESForCVE(ctx, cveID); err != nil {
-		v.CPEMatches = nil
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
 	}
-	return &v, nil
+
+	// CPE matches (the matching engine's evaluation input).
+	cq := r.db.Select(`cve_id, cpe, vendor, product, version, version_start_incl, version_start_excl,
+                version_end_incl, version_end_excl, version_type`).
+		From("vulnerability_cpe_matches").Where(squirrel.Eq{"cve_id": ids})
+	crows, err := r.db.Query(ctx, cq)
+	if err != nil {
+		return err
+	}
+	defer crows.Close()
+	for crows.Next() {
+		var cveID string
+		var m domain.CPEMatch
+		var cpe string
+		if err := crows.Scan(&cveID, &cpe, &m.Vendor, &m.Product, &m.Version,
+			&m.VersionStartIncl, &m.VersionStartExcl, &m.VersionEndIncl, &m.VersionEndExcl, &m.VersionType); err != nil {
+			return err
+		}
+		m.CPE = cpe
+		if v := out[cveID]; v != nil {
+			v.CPEMatches = append(v.CPEMatches, m)
+		}
+	}
+	if err := crows.Err(); err != nil {
+		return err
+	}
+
+	// Latest EPSS snapshot per CVE.
+	eq := r.db.Select("DISTINCT ON (cve_id) cve_id, date::text, epss, percentile").
+		From("vulnerability_epss").Where(squirrel.Eq{"cve_id": ids}).
+		OrderBy("cve_id, date DESC")
+	erows, err := r.db.Query(ctx, eq)
+	if err != nil {
+		return err
+	}
+	defer erows.Close()
+	for erows.Next() {
+		var cveID, date string
+		var epss, percentile float64
+		if err := erows.Scan(&cveID, &date, &epss, &percentile); err != nil {
+			return err
+		}
+		if v := out[cveID]; v != nil {
+			v.EPSS = &domain.EPSSRecord{CVEID: cveID, Date: date, EPSS: epss, Percentile: percentile, Source: "first"}
+		}
+	}
+	if err := erows.Err(); err != nil {
+		return err
+	}
+
+	// KEV status.
+	kq := r.db.Select(`cve_id, known_exploited, date_added, due_date, ransomware_use, required_action`).
+		From("vulnerability_kev").Where(squirrel.Eq{"cve_id": ids})
+	krows, err := r.db.Query(ctx, kq)
+	if err != nil {
+		return err
+	}
+	defer krows.Close()
+	for krows.Next() {
+		var cveID string
+		var rec domain.KEVRecord
+		if err := krows.Scan(&cveID, &rec.KnownExploited, &rec.DateAdded, &rec.DueDate,
+			&rec.RansomwareUse, &rec.RequiredAction); err != nil {
+			return err
+		}
+		if v := out[cveID]; v != nil {
+			rec.CVEID = cveID
+			rec.Source = "cisa_kev"
+			v.KnownExploited = &rec
+		}
+	}
+	if err := krows.Err(); err != nil {
+		return err
+	}
+
+	// Apply the affected statements collected above.
+	for cveID, affected := range affectedByCve {
+		if len(affected) > 0 {
+			_ = json.Unmarshal(affected, &out[cveID].Affected)
+		}
+	}
+	return nil
 }
 
 // ReplaceCPERefreshes the CPE match set of one CVE within a transaction.
@@ -227,6 +347,68 @@ func (r *VulnRepo) CandidateCVEsByProduct(ctx context.Context, vendor, product s
 		out = append(out, id)
 	}
 	return out, rows.Err()
+}
+
+// BackfillCPEIdentity parses the raw CPE criteria of stored applicability
+// rows into the indexed vendor/product/version columns. Feeds before the
+// identity fix stored blank identities, leaving CandidateCVEsByProduct
+// blind to nearly every NVD row (99%+ of the corpus). Idempotent and
+// cursor-driven: populated rows are skipped and unparseable criteria are
+// stepped past, so repeated runs converge and never loop forever. Runs in
+// the background at startup; returns the number of rows whose identity was
+// filled.
+func (r *VulnRepo) BackfillCPEIdentity(ctx context.Context, batchSize int) (int, error) {
+	if batchSize <= 0 {
+		batchSize = 2000
+	}
+	total := 0
+	var lastID string
+	for {
+		q := r.db.Select("id, cpe").From("vulnerability_cpe_matches").
+			Where(squirrel.Eq{"product": ""}).
+			OrderBy("id").Limit(uint64(batchSize))
+		if lastID != "" {
+			q = q.Where(squirrel.Gt{"id": lastID})
+		}
+		rows, err := r.db.Query(ctx, q)
+		if err != nil {
+			return total, err
+		}
+		type row struct {
+			id  string
+			cpe string
+		}
+		var batch []row
+		for rows.Next() {
+			var rec row
+			if err := rows.Scan(&rec.id, &rec.cpe); err != nil {
+				rows.Close()
+				return total, err
+			}
+			batch = append(batch, rec)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return total, err
+		}
+		if len(batch) == 0 {
+			return total, nil
+		}
+		lastID = batch[len(batch)-1].id
+		for _, rec := range batch {
+			p, ok := fingerprinting.ParseCPE(rec.cpe)
+			if !ok {
+				continue // unparseable criteria: stepped past, stays blank
+			}
+			uq := r.db.Update("vulnerability_cpe_matches").
+				Set("vendor", p.Vendor).Set("product", p.Product).Set("version", p.Version).
+				Where(squirrel.Eq{"id": rec.id})
+			if _, err := r.db.Exec(ctx, uq); err != nil {
+				return total, err
+			}
+			total++
+		}
+	}
 }
 
 // AddReferences stores reference links for a CVE.
@@ -503,13 +685,13 @@ func (r *FeedRepo) Sources(ctx context.Context) ([]domain.FeedSource, error) {
 // in the tables it writes. Feeds without a table here map to 0.
 func (r *FeedRepo) feedRecordTotals(ctx context.Context) (map[string]int64, error) {
 	sql := `SELECT
-		(SELECT COUNT(*) FROM vulnerability_kev),
-		(SELECT COUNT(DISTINCT cve_id) FROM vulnerability_epss),
-		(SELECT COUNT(*) FROM vulnerabilities WHERE source = 'nvd'),
-		(SELECT COUNT(*) FROM vulnerabilities WHERE source = 'cvelistv5'),
-		(SELECT COUNT(*) FROM osv_records),
-		(SELECT COUNT(*) FROM os_advisories),
-		(SELECT COUNT(*) FROM vulnerability_sources WHERE source = 'vulnrichment')`
+                (SELECT COUNT(*) FROM vulnerability_kev),
+                (SELECT COUNT(DISTINCT cve_id) FROM vulnerability_epss),
+                (SELECT COUNT(*) FROM vulnerabilities WHERE source = 'nvd'),
+                (SELECT COUNT(*) FROM vulnerabilities WHERE source = 'cvelistv5'),
+                (SELECT COUNT(*) FROM osv_records),
+                (SELECT COUNT(*) FROM os_advisories),
+                (SELECT COUNT(*) FROM vulnerability_sources WHERE source = 'vulnrichment')`
 	var kev, epss, nvd, cvelist, osv, advisories, vulnrich int64
 	if err := r.db.QueryRowSQL(ctx, sql).Scan(&kev, &epss, &nvd, &cvelist, &osv, &advisories, &vulnrich); err != nil {
 		return nil, err

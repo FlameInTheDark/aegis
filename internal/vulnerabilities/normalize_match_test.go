@@ -37,7 +37,7 @@ func osvDebIndex() *fakeIndex {
 
 func TestMatchPackageUsesNormalizedVersionAndKeepsRawEvidence(t *testing.T) {
 	m := &Matcher{Index: osvDebIndex()}
-	matches, err := m.Match(context.Background(), MatchInput{
+	matches, _, err := m.Match(context.Background(), MatchInput{
 		AssetID:     "asset-1",
 		Ecosystem:   fingerprinting.PkgEcoDebian,
 		PackageName: "openssl",
@@ -114,7 +114,7 @@ func TestCorrelateOSPackageUsesVersionNorm(t *testing.T) {
 // no normalized form the raw version is used as-is.
 func TestMatchPackageVersionOnlyGuard(t *testing.T) {
 	m := &Matcher{Index: osvDebIndex()}
-	matches, err := m.Match(context.Background(), MatchInput{
+	matches, _, err := m.Match(context.Background(), MatchInput{
 		Ecosystem: fingerprinting.PkgEcoDebian, PackageName: "openssl",
 		Version: "1:3.0.2-0ubuntu1.17", // above the fix
 	})

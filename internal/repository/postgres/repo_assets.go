@@ -2,11 +2,13 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/Masterminds/squirrel"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/FlameInTheDark/aegis/internal/domain"
 	"github.com/FlameInTheDark/aegis/internal/ids"
@@ -317,11 +319,21 @@ func (r *IdentifierRepo) Upsert(ctx context.Context, assetID, typ, value string,
 	return err
 }
 
-// FindByIdentifier returns assets sharing an identifier (correlation input).
-func (r *IdentifierRepo) FindByIdentifier(ctx context.Context, typ, value string) ([]string, error) {
-	q := r.db.Select("asset_id").From("asset_identifiers").
-		Where(squirrel.Eq{"type": typ, "value": value}).
-		OrderBy("weight DESC").Limit(10)
+// FindByIdentifier returns organization-scoped assets sharing an identifier
+// (correlation input). The organization filter lives in the query, not in
+// post-fetch checks: a global identifier lookup let one tenant's hostnames,
+// MACs and addresses poison another tenant's candidate sets (ambiguity
+// skips, wrong-asset merges) and leak asset IDs across tenants. An empty
+// orgID fails closed — identity resolution without tenancy is a bug, not a
+// lookup mode.
+func (r *IdentifierRepo) FindByIdentifier(ctx context.Context, orgID, typ, value string) ([]string, error) {
+	if orgID == "" {
+		return nil, nil
+	}
+	q := r.db.Select("i.asset_id").From("asset_identifiers i").
+		Join("assets a ON a.id = i.asset_id").
+		Where(squirrel.Eq{"i.type": typ, "i.value": value, "a.organization_id": orgID}).
+		OrderBy("i.weight DESC").Limit(10)
 	rows, err := r.db.Query(ctx, q)
 	if err != nil {
 		return nil, err
@@ -699,3 +711,21 @@ func nullStr(s string) any {
 }
 
 var _ = fmt.Sprintf
+
+// ExistsForAsset reports whether a package row already exists for an asset
+// (and returns its id). The agent inventory path uses it to emit
+// software.installed only for genuinely new rows.
+func (r *SoftwareRepo) ExistsForAsset(ctx context.Context, assetID, name, version, ecosystem string) (bool, string, error) {
+	q := r.db.Select("id").From("software").
+		Where(squirrel.Eq{"asset_id": assetID, "name": name, "version": version, "ecosystem": ecosystem}).
+		Limit(1)
+	var id string
+	err := r.db.QueryRow(ctx, q).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, "", nil
+		}
+		return false, "", err
+	}
+	return true, id, nil
+}

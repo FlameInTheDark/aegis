@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/FlameInTheDark/aegis/internal/alerting"
 	"github.com/FlameInTheDark/aegis/internal/domain"
 	"github.com/FlameInTheDark/aegis/internal/fingerprinting"
 	chx "github.com/FlameInTheDark/aegis/internal/repository/clickhouse"
@@ -659,6 +660,9 @@ func (a *App) handleDeleteAsset(c *fiber.Ctx) error {
 	if err := a.svc.Assets.Delete(Context(c), claims.OrganizationID, asset.ID); err != nil {
 		a.svc.Log.Warn("asset delete failed", "asset", asset.ID, "err", err)
 		return Internal("asset delete failed")
+	}
+	if a.svc.DB != nil {
+		_ = alerting.EmitAssetDeleted(Context(c), a.svc.DB, claims.OrganizationID, asset.SiteID, asset.ID, "operator")
 	}
 	userID, ip, ua := a.auditContext(c)
 	a.svc.AuditService.Entry(Context(c), claims.OrganizationID, userID, "asset.deleted", "asset:"+asset.ID, ip, ua, "success",

@@ -47,6 +47,19 @@ type Services struct {
 	Redis   *redisrepo.Client
 	CH      *ch.DB
 
+	// DB enables domain-event emission from HTTP mutations (finding status
+	// changes, asset deletion) into the alert outbox.
+	DB *pg.DB
+
+	// Alerting surface (triggers/occurrences/destinations/outbox) and the
+	// vulnerability search-action plane.
+	AlertTriggers     *pg.AlertTriggerRepo
+	Alerts            *pg.AlertOccurrenceRepo
+	AlertDestinations *pg.DestinationRepo
+	Outbox            *pg.OutboxRepo
+	CorrelationJobs   *pg.CorrelationJobRepo
+	VulnSearch        *pg.VulnSearchRepo
+
 	Orgs         *pg.OrgRepo
 	Users        *pg.UserRepo
 	Memberships  *pg.MembershipRepo
@@ -309,6 +322,42 @@ func (a *App) registerRoutes() {
 	// Webhooks (alerting).
 	g.Get("/webhooks", a.handleListWebhooks)
 	g.Post("/webhooks", a.handleCreateWebhook)
+
+	// Alerts: occurrences, trigger rules, destinations, engine health.
+	g.Get("/alerts/capabilities", a.handleAlertCapabilities)
+	g.Get("/alerts/health", a.handleAlertsHealth)
+	g.Get("/alerts", a.handleListAlerts)
+	g.Get("/alerts/:id", a.handleGetAlert)
+	g.Post("/alerts/:id/acknowledge", a.handleAckAlert)
+	g.Post("/alerts/:id/resolve", a.handleResolveAlert)
+	g.Get("/alerts/triggers", a.handleListTriggers)
+	g.Post("/alerts/triggers", a.handleCreateTrigger)
+	g.Post("/alerts/triggers/preview", a.handlePreviewTrigger)
+	g.Get("/alerts/triggers/:id", a.handleGetTrigger)
+	g.Put("/alerts/triggers/:id", a.handleUpdateTrigger)
+	g.Patch("/alerts/triggers/:id/enabled", a.handleToggleTrigger)
+	g.Delete("/alerts/triggers/:id", a.handleDeleteTrigger)
+	g.Post("/alerts/triggers/:id/test", a.handleTestTrigger)
+	g.Get("/alerts/destinations", a.handleListDestinations)
+	g.Post("/alerts/destinations", a.handleCreateDestination)
+	g.Patch("/alerts/destinations/:id", a.handleUpdateDestination)
+	g.Delete("/alerts/destinations/:id", a.handleDeleteDestination)
+	g.Post("/alerts/destinations/:id/test", a.handleTestDestination)
+	g.Post("/alerts/destinations/:id/replay", a.handleReplayDeadDeliveries)
+
+	// Vulnerability search actions + match workbench.
+	g.Get("/vulnerability-search-actions/capabilities", a.handleVulnSearchCapabilities)
+	g.Get("/vulnerability-search-actions", a.handleListSearchActions)
+	g.Post("/vulnerability-search-actions", a.handleCreateSearchAction)
+	g.Post("/vulnerability-search-actions/preview", a.handlePreviewSearchAction)
+	g.Get("/vulnerability-search-actions/:id", a.handleGetSearchAction)
+	g.Put("/vulnerability-search-actions/:id", a.handleUpdateSearchAction)
+	g.Delete("/vulnerability-search-actions/:id", a.handleDeleteSearchAction)
+	g.Post("/vulnerability-search-actions/:id/preview", a.handlePreviewSearchAction)
+	g.Post("/vulnerability-search-actions/:id/runs", a.handleRunSearchAction)
+	g.Get("/vulnerability-search-runs/:id", a.handleGetSearchRun)
+	g.Post("/vulnerabilities/match/search", a.handleVulnerabilityMatchSearch)
+	g.Get("/assets/:id/vulnerability-diagnostics", a.handleAssetVulnDiagnostics)
 
 	// Search, metrics, audit.
 	g.Get("/search", a.handleSearch)

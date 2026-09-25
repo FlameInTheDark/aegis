@@ -193,7 +193,10 @@ export function OverviewPage() {
                       <Cell key={d.name} fill={d.color} />
                     ))}
                   </Pie>
-                  <RTooltip content={<ChartTooltip />} />
+                  {/* wrapperStyle lifts the tooltip above the absolutely
+                      positioned center count, which would otherwise paint
+                      over it (same stacking context, later in DOM order). */}
+                  <RTooltip content={<ChartTooltip />} wrapperStyle={{ zIndex: 30 }} />
                 </PieChart>
               </ResponsiveContainer>
               <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">

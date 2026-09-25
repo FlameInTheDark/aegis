@@ -57,6 +57,63 @@ func TestRBACMatrix(t *testing.T) {
 	}
 }
 
+// Alert permissions must follow docs/ALERTS.md: alert:read for viewer and
+// up, alert:manage for security_analyst and up. Regression: the alert
+// permissions were declared in domain but granted to no role, so every
+// account — including the owner — got 403 on every alert endpoint.
+func TestRBACAlertPermissions(t *testing.T) {
+	for _, role := range []domain.Role{
+		domain.RoleOwner, domain.RoleAdministrator, domain.RoleSecurityAnalyst,
+		domain.RoleOperator, domain.RoleViewer,
+	} {
+		if !HasPermission(role, domain.PermAlertRead) {
+			t.Fatalf("%s must read alerts (alert:read is viewer and up)", role)
+		}
+	}
+	for _, role := range []domain.Role{
+		domain.RoleOwner, domain.RoleAdministrator, domain.RoleSecurityAnalyst,
+	} {
+		if !HasPermission(role, domain.PermAlertManage) {
+			t.Fatalf("%s must manage alerts (alert:manage is security_analyst and up)", role)
+		}
+	}
+	for _, role := range []domain.Role{domain.RoleOperator, domain.RoleViewer} {
+		if HasPermission(role, domain.PermAlertManage) {
+			t.Fatalf("%s must not manage alerts", role)
+		}
+	}
+}
+
+// Every declared permission must be granted to at least one role. A
+// permission granted to nobody silently 403s the whole platform for all
+// accounts (this shipped once: alert:read/alert:manage were enforced by
+// the API but absent from rolePermissions).
+func TestEveryPermissionIsGranted(t *testing.T) {
+	for _, perm := range []domain.Permission{
+		domain.PermOrgManage, domain.PermUserManage, domain.PermSiteManage,
+		domain.PermAssetRead, domain.PermAssetWrite, domain.PermScanCreate,
+		domain.PermScanCancel, domain.PermScanElevated, domain.PermAgentManage,
+		domain.PermFindingRead, domain.PermFindingWrite, domain.PermVulnRead,
+		domain.PermEventRead, domain.PermDetectionManage, domain.PermReportCreate,
+		domain.PermReportRead, domain.PermAuditRead, domain.PermSettingsManage,
+		domain.PermFeedManage, domain.PermAlertRead, domain.PermAlertManage,
+	} {
+		granted := false
+		for _, role := range []domain.Role{
+			domain.RoleOwner, domain.RoleAdministrator, domain.RoleSecurityAnalyst,
+			domain.RoleOperator, domain.RoleViewer,
+		} {
+			if HasPermission(role, perm) {
+				granted = true
+				break
+			}
+		}
+		if !granted {
+			t.Fatalf("permission %s is declared but granted to no role", perm)
+		}
+	}
+}
+
 func TestGenerateToken(t *testing.T) {
 	tok, err := GenerateToken("aeg_enroll")
 	if err != nil || len(tok) < 20 {

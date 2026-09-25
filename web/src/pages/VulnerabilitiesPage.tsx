@@ -16,6 +16,8 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { EmptyState, KeyValue, KpiTile, Mono, PageHeader, SeverityBadge, severityMeta, TableFooterBar } from "@/components/shared";
 import { usePageSize } from "@/lib/pagination";
+import { Tabs, TabsContent, TabsUnderlineList, TabsUnderlineTrigger } from "@/components/ui/tabs";
+import { SearchActions } from "@/components/vulns/SearchActions";
 
 function CvssBar({ score }: { score: number }) {
   const tone = score >= 9 ? severityMeta.critical.bg : score >= 7 ? severityMeta.high.bg : score >= 4 ? severityMeta.medium.bg : severityMeta.low.bg;
@@ -30,13 +32,14 @@ function CvssBar({ score }: { score: number }) {
 }
 
 export function VulnerabilitiesPage() {
-  const { query } = useRouter();
+  const { query, navigate } = useRouter();
   const [q, setQ] = React.useState(query.get("q") ?? "");
   const [sev, setSev] = React.useState("all");
   const [source, setSource] = React.useState("all");
   const [publishedFrom, setPublishedFrom] = React.useState("");
   const [publishedTo, setPublishedTo] = React.useState("");
   const [kevOnly, setKevOnly] = React.useState(query.get("kev") === "1");
+  const tab = query.get("tab") ?? "index";
   const [sort, setSort] = React.useState("published_at");
   const [sortDir, setSortDir] = React.useState<"asc" | "desc">("desc");
   const [page, setPage] = React.useState(1);
@@ -80,6 +83,12 @@ export function VulnerabilitiesPage() {
     <div className="flex flex-col gap-4">
       <PageHeader title="Vulnerabilities" description="CVE index entries ingested from NVD / CVE List v5 and matched against fingerprinted software. Prioritise by KEV membership and EPSS, not CVSS alone." />
 
+      <Tabs value={tab} onValueChange={(t) => navigate(`/vulnerabilities?tab=${t}`, { replace: true })}>
+        <TabsUnderlineList>
+          <TabsUnderlineTrigger value="index">CVE index</TabsUnderlineTrigger>
+          <TabsUnderlineTrigger value="actions">Search actions</TabsUnderlineTrigger>
+        </TabsUnderlineList>
+        <TabsContent value="index" className="mt-0 flex flex-col gap-4">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <KpiTile label="Index size" value={matchedQ.data?.total ?? "—"} hint="live CVE records in the database" icon={Bug} />
         <KpiTile label="Known exploited" value={kevQ.data?.total ?? "—"} tone="critical" hint="CISA KEV" icon={Siren} onClick={() => setKevOnly(true)} />
@@ -264,6 +273,11 @@ export function VulnerabilitiesPage() {
       </div>
 
       {detailId && <VulnDetailSheet cveId={detailId} onClose={() => setDetailId(null)} />}
+        </TabsContent>
+        <TabsContent value="actions" className="mt-0">
+          <SearchActions />
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

@@ -97,6 +97,21 @@ func (d *DB) ExecSQL(ctx context.Context, sql string, args ...any) (commandTag, 
 	return commandTag{tag}, err
 }
 
+// ErrConflict reports an optimistic-concurrency violation (revision check).
+var ErrConflict = fmt.Errorf("postgres: conflict")
+
+// ExecOne runs a built statement and maps zero rows affected to ErrNotFound.
+func (d *DB) ExecOne(ctx context.Context, q squirrel.Sqlizer, what string) error {
+	tag, err := d.Exec(ctx, q)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%s: %w", what, ErrNotFound)
+	}
+	return nil
+}
+
 type commandTag struct {
 	inner interface{ RowsAffected() int64 }
 }
