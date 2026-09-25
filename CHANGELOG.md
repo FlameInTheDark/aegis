@@ -1,3 +1,19 @@
+# 1.0.0 (2026-09-25)
+
+
+### Bug Fixes
+
+* added rest of files ([1c00805](https://github.com/FlameInTheDark/aegis/commit/1c00805be7dfd5320340306c563f2db5f60cd79a))
+* lots of fixes ([7dd8118](https://github.com/FlameInTheDark/aegis/commit/7dd81189ee0de5008d2225f311090694033626c7))
+* **web:** correct case-sensitive import path for ui/select module ([d75e2b0](https://github.com/FlameInTheDark/aegis/commit/d75e2b0f41870629a595ec9ac024942b76b17dad))
+
+
+### Features
+
+* alerts feature ([70c4c59](https://github.com/FlameInTheDark/aegis/commit/70c4c59260a8bcb7506e90a94735555ed2b2bdcb))
+* initial ([4b88bd5](https://github.com/FlameInTheDark/aegis/commit/4b88bd58709af0f8449e3f747370eb2e8a65847c))
+* pretty big changes and rework of many components ([554eb45](https://github.com/FlameInTheDark/aegis/commit/554eb45e13391c7b5786f89a1b08eca8c6ded333))
+
 ## [1.33.0] - 2026-09-25
 
 ### Added
