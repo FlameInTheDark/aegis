@@ -25,8 +25,8 @@ That said, the review found **concrete, reproducible defects in four clusters**:
 
 1. **Tenant-isolation gaps (P0).** Organization scoping is enforced *by convention* in handler code (there is no RLS anywhere in `migrations/postgres/`). Four read endpoints and one write endpoint bypass that convention, and the suppression feature — the mechanism designed to make findings durable — is never consumed by the correlation pipeline.
 2. **Trust-boundary / deployment defects (P0–P1).** The HTTP server trusts a client-supplied `X-Forwarded-For` globally (rate-limit bypass, audit-log spoofing, memory growth), `/readyz` always returns `200` so Kubernetes readiness gates are inert, the Helm chart cannot render (missing helper + missing values), the Kubernetes Secret keys are wrong for the consumers, and the dev `scripts/` tree referenced by the Makefile and docs is not in the repository at all.
-3. **Frontend correctness (P1–P2).** Client-side filtering applied *after* server-side pagination silently shortens pages and mis-states totals (Findings "Active", Scans, Detections, Events, assets/findings facets); the "updated 45 s ago" freshness chip on the dashboard is hard-coded; a hook that sends search to the server on every keystroke exists next to a debounce helper with zero callers; and several hooks/endpooints the UI advertises (notes thread, detection-rule authoring, global search in the command palette) are not wired.
-4. **A UI with two design generations and thin state handling.** Two component kits, two charting libraries, duplicated badges/empty states, no skeleton loaders, no error states on any page, inconsistent permission gating, and a 2 400 px-wide desktop layout that never adapts to small screens.
+3. **Frontend correctness (P1–P2).** Client-side filtering applied *after* server-side pagination silently shortens pages and mis-states totals (Findings "Active", Scans, Detections, Events, assets/findings facets); the "updated 45 s ago" freshness chip on the dashboard is hard-coded; a hook that sends search to the server on every keystroke exists next to a debounce helper with zero callers; and several hooks/endpoints the UI advertises (notes thread, detection-rule authoring, global search in the command palette) are not wired.
+4. **A UI with two design generations and thin state handling.** Two component kits, two charting libraries, duplicated badges/empty states, no skeleton loaders, no error states on any page, inconsistent permission gating, and a sidebar-first desktop layout that never adapts to small screens.
 
 ### Top 12 fixes by value
 
@@ -45,7 +45,7 @@ That said, the review found **concrete, reproducible defects in four clusters**:
 | 11 | Findings/Scans/Detections/Events paginate on the server and then filter in the browser, silently truncating and mis-counting | **P1** | §4.1 |
 | 12 | Access JWTs cannot be revoked: `sid` is issued but never checked, so logout/password change/disable leaves tokens valid up to `AEGIS_ACCESS_TOKEN_TTL` (default **1 h**) | **P1** | §2.11 |
 
-Quick wins (each ≤ 1 day, high signal): return `503` from `/readyz`; add `organization_id` to the three unscoped repo updates; delete the eight `var _ = …` artefacts; drop `tailwind.config.ts`; remove the hard-coded `45_000`; gate `/vulnerability-search-actions/capabilities`; wire `useDebounced` into the three server-search inputs; add `ErrorState` branches to the query pages; make the CI `frontend` job run `npm test`.
+Quick wins (each ≤ 1 day, high signal): return `503` from `/readyz`; add the org predicate to `AssetRepo.Update` and pre-resolve the asset in the write handler; delete the eight `var _ = …` artefacts; drop `tailwind.config.ts`; remove the hard-coded `45_000`; gate `/vulnerability-search-actions/capabilities`; wire `useDebounced` into the three server-search inputs; add `ErrorState` branches to the query pages; make the CI `frontend` job run `npm test`.
 
 ---
 
