@@ -60,6 +60,7 @@ func TestMissingDatabaseURLErrorNamesCanonicalKey(t *testing.T) {
 // cannot generate a dev CA and enrollment silently stays disabled
 // (os.ReadFile("") produces the confusing `open :` error on Windows).
 func TestAgentCADefaults(t *testing.T) {
+	t.Setenv("AEGIS_DATABASE_URL", "postgres://aegis:aegis@localhost:5432/aegis?sslmode=disable")
 	t.Setenv("AEGIS_AGENT_CA_CERT", "")
 	t.Setenv("AEGIS_AGENT_CA_KEY", "")
 
@@ -74,6 +75,7 @@ func TestAgentCADefaults(t *testing.T) {
 }
 
 func TestAgentCAEnvOverride(t *testing.T) {
+	t.Setenv("AEGIS_DATABASE_URL", "postgres://aegis:aegis@localhost:5432/aegis?sslmode=disable")
 	t.Setenv("AEGIS_AGENT_CA_CERT", "/etc/aegis/ca.crt")
 	t.Setenv("AEGIS_AGENT_CA_KEY", "/etc/aegis/ca.key")
 

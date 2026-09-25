@@ -1,0 +1,74 @@
+name: Aegis Semantic Release
+
+# Versioning authority: semantic-release and nothing else. Versions, tags
+# and CHANGELOG.md entries are created exclusively by this workflow, exactly
+# like FlameInTheDark/emerald. Artifact packaging lives in release-build.yml,
+# which this workflow triggers after a release is published.
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: Install frontend dependencies
+        run: npm --prefix web ci
+
+      - name: Build embedded frontend
+        run: npm --prefix web run build
+
+      - name: Run tests
+        run: go test ./... -short
+
+      - name: Run lint
+        run: |
+          test -z "$(gofmt -l cmd internal api 2>/dev/null)" || { gofmt -l cmd internal api; exit 1; }
+          go vet ./...
+
+      - name: Run semantic-release
+        id: semantic
+        uses: cycjimmy/semantic-release-action@v4
+        with:
+          extra_plugins: |
+            @semantic-release/changelog
+            @semantic-release/git
+            @semantic-release/github
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Dispatch release build
+        if: steps.semantic.outputs.new_release_published == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          gh api
+          repos/${{ github.repository }}/dispatches
+          -f event_type=semantic-release-published
+          -F client_payload[tag_name]=${{ steps.semantic.outputs.new_release_git_tag }}
+          -F client_payload[release_version]=${{ steps.semantic.outputs.new_release_version }}
+          -F client_payload[prerelease]=false
