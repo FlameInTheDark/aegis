@@ -30,7 +30,7 @@ RUN CGO_ENABLED=0 go build -trimpath \
     -ldflags="-s -w -X main.scannerVersion=${AEGIS_VERSION}" \
     -o /out/aegis-scanner ./cmd/scanner
 
-FROM alpine:3.20
+FROM alpine:3.24
 # traceroute lives in the community repo (enabled in the alpine image by
 # default); iputils-tracepath/libcap/iproute2 are in main.
 RUN apk add --no-cache ca-certificates nmap nmap-scripts libcap traceroute iputils-tracepath iproute2 \
