@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS aegis.security_events
     payload_meta   String DEFAULT '' CODEC(ZSTD(3)),   -- JSON, bounded; large payloads go to object storage
     raw_reference  String DEFAULT '',
     tags           Array(String),
+    synthetic      UInt8 DEFAULT 0,
     INDEX idx_rule rule_name TYPE bloom_filter(0.01) GRANULARITY 4
 )
 ENGINE = MergeTree
@@ -237,3 +238,8 @@ PARTITION BY toYYYYMM(timestamp)
 ORDER BY (timestamp, tenant_id, agent_id)
 TTL toDateTime(timestamp) + INTERVAL 30 DAY
 SETTINGS index_granularity = 8192;
+
+-- Idempotent additions for tables created by earlier schema versions.
+-- F11: synthetic marks console test-ingest / demo telemetry so it never
+-- masquerades as real sensor data.
+ALTER TABLE aegis.security_events ADD COLUMN IF NOT EXISTS synthetic UInt8 DEFAULT 0;

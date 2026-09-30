@@ -55,7 +55,11 @@ Create `migrations/postgres/00NN_name.{up,down}.sql` (embedded automatically). N
 
 ## Frontend
 
-Vite dev server proxies `/api` to `:8080`. Components live under `src/components` (primitives: DataTable, charts with a shared ECharts theme); features under `src/features/*`. URL-persisted filters, command palette (⌘K), keyboard chords (`g a`, `g s`, `g v`, `g e`).
+Vite dev server proxies `/api` to `:8080`. Components live under `src/components` (primitives: DataTable, charts with a shared ECharts theme via `components/charts/Chart.tsx`); screens live under `src/pages` (the console predates the features/ layout this file used to claim — there is no `src/features`). URL-persisted filters, command palette (⌘K), keyboard chords (`g a`, `g s`, `g v`, `g e`).
+
+### Routing: hash router is intentional
+
+The SPA uses a HASH router (`web/src/lib/router.tsx`): URLs look like `/#/findings?severity=critical`. It works from any static file server and offline with zero server rewrites — that is a deliberate trade, not an accident. Shared links therefore carry their filters in the hash query, and the command palette's **Copy link to current view** action copies exactly that form. Do not switch to the History API without also adopting the nginx/Vite history fallback everywhere the console is served.
 
 ## Traceroute from containers
 

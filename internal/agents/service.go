@@ -346,7 +346,12 @@ func (s *Service) persistSoftware(ctx context.Context, orgID, siteID, assetID st
 			s.Log.Warn("software existence check failed", "asset", assetID, "err", err)
 		}
 		pkg.AssetID = assetID
-		pkg.Source = string(domain.SourceAgent)
+		// Source is preserved when the collector supplied one
+		// (e.g. 'container' rows from F9); plain agent packages
+		// default to the agent source.
+		if pkg.Source == "" {
+			pkg.Source = string(domain.SourceAgent)
+		}
 		pkg.LastSeen = time.Now().UTC()
 		if err := s.Software.Upsert(ctx, &pkg); err != nil {
 			s.Log.Warn("software upsert failed", "asset", assetID, "name", pkg.Name, "err", err)
@@ -356,6 +361,24 @@ func (s *Service) persistSoftware(ctx context.Context, orgID, siteID, assetID st
 			_ = alerting.EmitSoftwareInstalled(ctx, s.DB, orgID, siteID, assetID, pkg.ID, pkg.Name, pkg.Version, pkg.Ecosystem)
 		}
 	}
+}
+
+// ApplySoftwareInventory persists packages reported by a bound device
+// (F9). Resolves the device's asset the same way LinkInventory does; a
+// device without a bound asset has nothing to attach to yet.
+func (s *Service) ApplySoftwareInventory(ctx context.Context, agentID string, pkgs []domain.Software) (int, error) {
+	if s.Software == nil || len(pkgs) == 0 {
+		return 0, nil
+	}
+	agent, err := s.Repo.ByIDAnyOrg(ctx, agentID)
+	if err != nil {
+		return 0, err
+	}
+	if agent.AssetID == nil || *agent.AssetID == "" {
+		return 0, nil
+	}
+	s.persistSoftware(ctx, agent.OrganizationID, agent.SiteID, *agent.AssetID, pkgs)
+	return len(pkgs), nil
 }
 
 // matchAsset resolves an inventory to an existing asset of the device's

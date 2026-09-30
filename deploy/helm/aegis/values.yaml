@@ -13,19 +13,30 @@ resources:
   requests: { cpu: 100m, memory: 128Mi }
   limits: { cpu: "1", memory: 512Mi }
 
+# All credentials come from ONE pre-created Secret, never from values.yaml:
+# literals in this file end up in rendered manifests, shell history and
+# `helm get values` output. Create it out-of-band:
+#
+#   kubectl create secret generic aegis-secrets \
+#     --from-literal=database-url='postgres://aegis:...@postgres:5432/aegis?sslmode=disable' \
+#     --from-literal=jwt-secret='<32+ byte random string>' \
+#     --from-literal=bootstrap-admin-email='admin@aegis.local' \
+#     --from-literal=bootstrap-admin-password='<long random>'
+#
+# feed-worker and scanner also envFrom this Secret (feed/database credentials).
+secrets:
+  existingSecret: "aegis-secrets" # name of the pre-created Secret
+
 config:
   env: production
   logLevel: info
-  databaseURL: postgres://aegis:aegis@postgres:5432/aegis?sslmode=disable
+  # Non-secret endpoints only. The database DSN (which contains the
+  # database password) is read from the Secret above, key `database-url`.
   redisURL: redis://redis:6379/0
   natsURL: nats://nats:4222
   clickhouseURL: clickhouse://clickhouse:9000
   s3Endpoint: http://rustfs:9000
   s3Bucket: aegis
-  # secrets must come from a Secret, never values.yaml in real deployments
-  jwtSecret: change-me
-  bootstrapAdminEmail: admin@aegis.local
-  bootstrapAdminPassword: change-me
 
 ingress:
   enabled: false

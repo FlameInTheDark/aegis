@@ -62,7 +62,8 @@ docker: ## Build all service images
 test: ## Run Go tests
 	$(GO) test ./... -race -count=1
 
-test-frontend: ## Build the SPA and run the Playwright browser suites
+test-frontend: ## Unit (Vitest) + build + Playwright browser suites
+	cd web && $(NODE) run test
 	cd web && $(NODE) run build
 	cd web && $(NODE) run test:e2e
 

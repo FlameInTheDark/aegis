@@ -21,15 +21,18 @@ import (
 	"github.com/FlameInTheDark/aegis/internal/audit"
 	"github.com/FlameInTheDark/aegis/internal/auth"
 	"github.com/FlameInTheDark/aegis/internal/ca"
+	"github.com/FlameInTheDark/aegis/internal/cloud"
 	"github.com/FlameInTheDark/aegis/internal/config"
 	"github.com/FlameInTheDark/aegis/internal/connectors"
 	"github.com/FlameInTheDark/aegis/internal/detections"
 	"github.com/FlameInTheDark/aegis/internal/domain"
+	"github.com/FlameInTheDark/aegis/internal/handoff"
 	"github.com/FlameInTheDark/aegis/internal/hub"
 	"github.com/FlameInTheDark/aegis/internal/ids"
 	"github.com/FlameInTheDark/aegis/internal/joblog"
 	"github.com/FlameInTheDark/aegis/internal/logging"
 	"github.com/FlameInTheDark/aegis/internal/observability"
+	"github.com/FlameInTheDark/aegis/internal/oidc"
 	"github.com/FlameInTheDark/aegis/internal/organizations"
 	"github.com/FlameInTheDark/aegis/internal/platform"
 	"github.com/FlameInTheDark/aegis/internal/reports"
@@ -211,12 +214,13 @@ func run() error {
 	detectEngine := &detections.Engine{
 		Rules: pg.NewRuleRepo(db), Matches: pg.NewMatchRepo(db), Baselines: pg.NewBaselineRepo(db),
 		Cache: rdb, Log: log,
-		Outbox: pg.NewOutboxRepo(db),
+		Outbox: pg.NewOutboxRepo(db), Metrics: metrics,
 	}
 	ingestor := &telemetry.Ingestor{Bus: bus, CH: chDB, Engine: detectEngine, Cache: rdb, Log: log, BatchSize: 500}
 	reportsSvc := &reports.Service{
 		Reports: pg.NewReportRepo(db), Findings: pg.NewFindingRepo(db), Assets: assetsRepo, Details: pg.NewReportDetailRepo(db),
 		Sites: pg.NewSiteRepo(db), Orgs: pg.NewOrgRepo(db), Services: pg.NewServiceRepo(db), Scans: pg.NewScanRepo(db), Store: store, Log: log,
+		Vulns: vulnRepo,
 	}
 	// --- unified external connections (agents / scanners / collectors)
 	connectorsSvc := connectors.New(pg.NewConnectorRepo(db), pg.NewConnectorTokenRepo(db), log,
@@ -276,8 +280,15 @@ func run() error {
 		Suppressions: pg.NewSuppressionRepo(db), Notes: pg.NewNoteRepo(db),
 		Rules: pg.NewRuleRepo(db), Matches: pg.NewMatchRepo(db), Baselines: pg.NewBaselineRepo(db),
 		Topology: topoRepo, Traces: traceRepo, Reports: pg.NewReportRepo(db),
-		Groups:  pg.NewGroupRepo(db),
-		JobLogs: jobLogStore, WSHub: jobLogHub,
+		Groups:       pg.NewGroupRepo(db),
+		SavedViews:   pg.NewSavedViewRepo(db),
+		Integrations: pg.NewIntegrationRepo(db),
+		IngestTokens: pg.NewIngestTokenRepo(db),
+		SSO:          pg.NewSSORepo(db),
+		OIDC:         &oidc.Client{},
+		Cloud:        &cloud.Service{Assets: assetsRepo, Ident: identRepo, Log: log},
+		Handoff:      &handoff.Client{},
+		JobLogs:      jobLogStore, WSHub: jobLogHub,
 		OrgService: orgSvc, Orchestrator: orch, Detections: detectEngine, Ingestor: ingestor,
 		ReportsService: reportsSvc, AgentsService: agentsSvc, Correlator: correlator,
 		ConnectorsService: connectorsSvc,
@@ -298,6 +309,15 @@ func run() error {
 	// --- gRPC agent transport
 	authority, err := ca.Load(cfg.AgentCA.CertPath, cfg.AgentCA.KeyPath, !cfg.IsProduction())
 	if err != nil {
+		if cfg.IsProduction() {
+			// One documented transport path: TLS terminates at a trusted
+			// ingress, and device identity always comes from the agent CA.
+			// A production server without the CA would silently hand out
+			// unauthenticated enroll errors later — refuse to start instead,
+			// the way the worker refuses a schema it does not understand.
+			log.Error("agent CA required in production — refusing to start (set AEGIS_AGENT_CA_CERT and AEGIS_AGENT_CA_KEY)", "err", err)
+			return err
+		}
 		log.Warn("agent CA unavailable — gRPC enroll disabled", "err", err)
 	}
 	grpcSrv := grpc.NewServer(grpc.Creds(insecure.NewCredentials())) // TLS terminated at LB in production; mTLS documented

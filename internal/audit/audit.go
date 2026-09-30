@@ -25,6 +25,7 @@ type Service struct {
 // Action type constants keep the vocabulary consistent across services.
 const (
 	ActionLogin          = "auth.login"
+	ActionOrgSwitch      = "auth.org_switched" // F3: tenant change is audited
 	ActionLogout         = "auth.logout"
 	ActionTokenRevoke    = "auth.token_revoked"
 	ActionConfigChange   = "config.changed"

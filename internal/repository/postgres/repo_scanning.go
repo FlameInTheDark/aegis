@@ -808,6 +808,82 @@ func (r *ChangeRepo) ListForScan(ctx context.Context, scanID string) ([]domain.C
 	return out, rows.Err()
 }
 
+// ChangeFilter bounds the org-wide changes listing (F7: change timeline).
+type ChangeFilter struct {
+	SiteID string
+	Type   string
+	From   *time.Time
+	To     *time.Time
+	Limit  int
+	Offset int
+}
+
+// ListFiltered returns one page of the org's change history with the total
+// count for pagination. Org scoping rides the sites join — scan_changes
+// carries no organization column of its own.
+func (r *ChangeRepo) ListFiltered(ctx context.Context, orgID string, f ChangeFilter) ([]domain.Change, int, error) {
+	if f.Limit <= 0 || f.Limit > 200 {
+		f.Limit = 50
+	}
+	if f.Offset < 0 {
+		f.Offset = 0
+	}
+	apply := func(b squirrel.SelectBuilder) squirrel.SelectBuilder {
+		b = b.Join("sites s ON s.id = c.site_id").Where(squirrel.Eq{"s.organization_id": orgID})
+		if f.SiteID != "" {
+			b = b.Where(squirrel.Eq{"c.site_id": f.SiteID})
+		}
+		if f.Type != "" {
+			b = b.Where(squirrel.Eq{"c.type": f.Type})
+		}
+		if f.From != nil {
+			b = b.Where(squirrel.GtOrEq{"c.created_at": *f.From})
+		}
+		if f.To != nil {
+			b = b.Where(squirrel.LtOrEq{"c.created_at": *f.To})
+		}
+		return b
+	}
+	q := apply(r.db.Select("c.id, c.scan_id::text, c.site_id::text, c.type, COALESCE(c.asset_id::text,'') AS asset_id, COALESCE(c.entity,'') AS entity, COALESCE(c.before_value,'') AS before_value, COALESCE(c.after_value,'') AS after_value, c.created_at").
+		From("scan_changes c")).OrderBy("c.created_at DESC").Limit(uint64(f.Limit)).Offset(uint64(f.Offset))
+	rows, err := r.db.Query(ctx, q)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []domain.Change
+	for rows.Next() {
+		var ch domain.Change
+		if err := rows.Scan(&ch.ID, &ch.ScanID, &ch.SiteID, &ch.Type, &ch.AssetID, &ch.Entity,
+			&ch.Before, &ch.After, &ch.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, ch)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	cq := apply(r.db.Select("COUNT(*)").From("scan_changes c"))
+	var total int
+	if err := r.db.QueryRow(ctx, cq).Scan(&total); err != nil {
+		return out, 0, err
+	}
+	return out, total, nil
+}
+
+// ChangesSince counts the org's change records after a point in time —
+// the Overview "changes in 7 days" tile.
+func (r *ChangeRepo) ChangesSince(ctx context.Context, orgID string, since time.Time) (int, error) {
+	q := r.db.Select("COUNT(*)").
+		From("scan_changes c").
+		Join("sites s ON s.id = c.site_id").
+		Where(squirrel.Eq{"s.organization_id": orgID}).
+		Where(squirrel.GtOrEq{"c.created_at": since})
+	var n int
+	err := r.db.QueryRow(ctx, q).Scan(&n)
+	return n, err
+}
+
 // Delete removes a schedule owned by an org.
 func (r *ScheduleRepo) Delete(ctx context.Context, orgID, id string) error {
 	q := r.db.Delete("scan_schedules").Where(squirrel.Eq{"organization_id": orgID, "id": id})

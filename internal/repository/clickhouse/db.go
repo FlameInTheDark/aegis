@@ -171,7 +171,7 @@ func (d *DB) InsertEvents(ctx context.Context, events []domain.Event) error {
 			parseIP(e.SrcIP), uint16(e.SrcPort), mustUUID(e.DstAssetID),
 			parseIP(e.DstIP), uint16(e.DstPort), e.Protocol, e.Direction,
 			string(e.Severity), e.Action, e.RuleID, e.RuleName, e.Application,
-			e.Hostname, e.User, e.Process, marshalJSON(e.PayloadMeta), e.RawReference, e.Tags,
+			e.Hostname, e.User, e.Process, marshalJSON(e.PayloadMeta), e.RawReference, e.Tags, e.Synthetic,
 		); err != nil {
 			_ = batch.Abort()
 			return fmt.Errorf("clickhouse: append: %w", err)
@@ -241,7 +241,7 @@ func (d *DB) QueryEvents(ctx context.Context, f EventFilter) ([]domain.Event, er
 		f.Limit = 100
 	}
 	rows, err := d.conn.Query(ctx,
-		"SELECT event_id, site_id, sensor_id, agent_id, timestamp, event_type, source, src_ip, src_port, dst_ip, dst_port, protocol, direction, severity, action, rule_id, rule_name, hostname FROM security_events WHERE "+where+" ORDER BY timestamp DESC, event_id DESC LIMIT ?",
+		"SELECT event_id, site_id, sensor_id, agent_id, timestamp, event_type, source, src_ip, src_port, dst_ip, dst_port, protocol, direction, severity, action, rule_id, rule_name, hostname, synthetic FROM security_events WHERE "+where+" ORDER BY timestamp DESC, event_id DESC LIMIT ?",
 		append(args, f.Limit)...)
 	if err != nil {
 		return nil, err
@@ -254,11 +254,13 @@ func (d *DB) QueryEvents(ctx context.Context, f EventFilter) ([]domain.Event, er
 		var agentID, siteID uuid.UUID
 		var srcPort, dstPort uint16 // UInt16 columns; domain.Event uses int
 		var severity string         // named type; the driver only scans String into *string
+		var synthetic uint8         // F11: console test-ingest marker
 		if err := rows.Scan(&e.EventID, &siteID, &e.SensorID, &agentID, &e.Timestamp,
 			&e.EventType, &e.Source, &srcIP, &srcPort, &dstIP, &dstPort,
-			&e.Protocol, &e.Direction, &severity, &e.Action, &e.RuleID, &e.RuleName, &e.Hostname); err != nil {
+			&e.Protocol, &e.Direction, &severity, &e.Action, &e.RuleID, &e.RuleName, &e.Hostname, &synthetic); err != nil {
 			return nil, err
 		}
+		e.Synthetic = synthetic != 0
 		e.SrcPort = int(srcPort)
 		e.DstPort = int(dstPort)
 		e.Severity = domain.Severity(severity)

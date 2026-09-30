@@ -162,6 +162,7 @@ function mapSoftware(s: A.SoftwareRow): Software {
       ? { raw: s.version_meta.raw, normalized: s.version_meta.normalized, wellFormed: s.version_meta.well_formed, grammar: s.version_meta.grammar, epoch: s.version_meta.epoch, upstream: s.version_meta.upstream, revision: s.version_meta.revision }
       : undefined,
     ecosystem: s.ecosystem || undefined, purl: s.purl || undefined, source: s.source || undefined,
+    osvStatus: s.osv_status || undefined, osvQueriedAt: s.osv_queried_at || undefined,
   };
 }
 
@@ -188,7 +189,10 @@ export function mapFinding(f: A.Finding): Finding {
     confidence: pct(f.confidence), riskScore: num(f.risk_score),
     remediation: f.remediation || undefined, notes: f.notes || undefined,
     firstSeen: f.first_seen, lastSeen: f.last_seen, assignee: f.owner || undefined,
+    dueDate: f.due_date || undefined,
     product: f.product || undefined, version: f.version || undefined,
+    externalTracker: f.external_tracker || undefined, externalKey: f.external_key || undefined,
+    externalUrl: f.external_url || undefined, externalSyncedAt: f.external_synced_at || undefined,
   };
 }
 
@@ -876,6 +880,8 @@ export interface FindingListParams {
   status?: string
   severity?: string
   search?: string
+  /** "me" resolves to the signed-in user server-side (F2 my queue) */
+  owner?: "me"
   kev?: boolean
   minRisk?: number
   page?: number
@@ -889,6 +895,7 @@ export function useFindings(p: FindingListParams = {}) {
   if (p.status && p.status !== "all") q.set("status", p.status);
   if (p.severity && p.severity !== "all") q.set("severity", p.severity);
   if (p.search) q.set("search", p.search);
+  if (p.owner) q.set("owner", p.owner);
   if (p.kev) q.set("kev", "true");
   if (p.minRisk) q.set("min_risk", String(p.minRisk));
   q.set("limit", String(p.limit ?? 50));
@@ -922,8 +929,8 @@ export function useFinding(id: string | undefined) {
 export function useUpdateFinding() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, status, reason, owner }: { id: string; status?: string; reason?: string; owner?: string }) =>
-      api.patch<{ finding: A.Finding }>(`/findings/${id}`, { status, reason, owner }),
+    mutationFn: ({ id, status, reason, owner, dueDate }: { id: string; status?: string; reason?: string; owner?: string; dueDate?: string }) =>
+      api.patch<{ finding: A.Finding }>(`/findings/${id}`, { status, reason, owner, due_date: dueDate }),
     onSuccess: (_d, v) => {
       qc.invalidateQueries({ queryKey: ["findings"] });
       qc.invalidateQueries({ queryKey: ["finding", v.id] });
@@ -938,6 +945,19 @@ export function useBulkFindings() {
   return useMutation({
     mutationFn: ({ ids, status, reason }: { ids: string[]; status: string; reason?: string }) =>
       api.post<{ updated: number }>("/findings/bulk", { ids, status, reason, confirm: true }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["findings"] });
+      qc.invalidateQueries({ queryKey: ["metrics"] });
+    },
+  });
+}
+
+/** Bulk assign sets one owner on many findings (F2 "My queue"). */
+export function useBulkAssignFindings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ ids, owner }: { ids: string[]; owner: string }) =>
+      api.post<{ updated: number }>("/findings/bulk-assign", { ids, owner }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["findings"] });
       qc.invalidateQueries({ queryKey: ["metrics"] });
@@ -960,10 +980,21 @@ export function useSuppressFinding() {
 // ---------------------------------------------------------------------------
 // detections
 
-export function useDetectionMatches(p: { level?: string; status?: string; limit?: number } = {}) {
+export function useDetectionMatches(p: {
+  level?: string;
+  status?: string;
+  search?: string;
+  assignee?: "me";
+  page?: number;
+  limit?: number;
+  withCounts?: boolean;
+} = {}) {
   const q = new URLSearchParams();
   if (p.level && p.level !== "all") q.set("level", p.level);
   if (p.status && p.status !== "all") q.set("status", p.status);
+  if (p.search) q.set("q", p.search);
+  if (p.assignee) q.set("assignee", p.assignee);
+  q.set("page", String(p.page ?? 1));
   q.set("limit", String(p.limit ?? 50));
   return useQuery({
     queryKey: qk.matches({ ...p }),
@@ -979,7 +1010,7 @@ export function useDetectionMatches(p: { level?: string; status?: string; limit?
         description: m.summary, count: num(m.count, 1),
         indicators: [m.src_ip, m.entity].filter(Boolean).map(String),
       }));
-      return { items, total: res.total };
+      return { items, total: res.total, counts: (res.counts ?? null) as Record<string, number> | null };
     },
     refetchInterval: 15_000,
   });
@@ -998,9 +1029,12 @@ export function useDetectionRules() {
 export function useUpdateMatchStatus() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, status }: { id: string; status: string }) =>
-      api.patch<{ id: string; status: string }>(`/detections/matches/${id}`, { status }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["detection-matches"] }),
+    mutationFn: ({ id, status, assignee }: { id: string; status?: string; assignee?: string }) =>
+      api.patch<{ id: string; status?: string; assignee?: string }>(`/detections/matches/${id}`, { status, assignee }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["detection-matches"] });
+      qc.invalidateQueries({ queryKey: ["metrics"] });
+    },
   });
 }
 
@@ -1041,7 +1075,7 @@ export function useEvents(p: { eventType?: string; severity?: string; source?: s
           id: e.event_id, timestamp: e.timestamp,
           level: e.severity && e.severity !== "info" ? (e.severity as PlatformEvent["level"]) : "info",
           category: e.event_type || "event",
-          message: e.rule_name || e.application || `${e.event_type}${e.src_ip ? ` from ${e.src_ip}` : ""}`,
+          message: (e.synthetic ? "[synthetic] " : "") + (e.rule_name || e.application || `${e.event_type}${e.src_ip ? ` from ${e.src_ip}` : ""}`),
           srcIp: e.src_ip || undefined,
           meta: Object.fromEntries(Object.entries({
             dst: [e.dst_ip, e.dst_port].filter((x) => x !== undefined && x !== null).join(":"),
@@ -1550,5 +1584,230 @@ export function useRunMetricsCleanup() {
       });
     },
     onError: (e) => toast({ title: "Cleanup failed", description: (e as Error).message, variant: "error" }),
+  });
+}
+
+// ---------------------------------------------------------------------------
+// F7 change timeline, F12 saved views, F11 ingest tokens, F6 integrations + handoff, F4 SSO
+
+export interface ChangeTimelineParams {
+  site_id?: string
+  type?: string
+  from?: string
+  to?: string
+  limit?: number
+  offset?: number
+}
+
+export function useChanges(params: ChangeTimelineParams) {
+  return useQuery({
+    queryKey: ["changes", params],
+    queryFn: async (): Promise<{ items: A.ChangeTimelineRow[]; total: number }> => {
+      const qs = new URLSearchParams();
+      for (const [k, v] of Object.entries(params)) if (v) qs.set(k, String(v));
+      return api.get(`/changes?${qs.toString()}`);
+    },
+    placeholderData: keepPreviousData,
+  });
+}
+
+export interface SavedView {
+  id: string
+  page: string
+  name: string
+  query: string
+  createdAt: string
+}
+
+export function useSavedViews(page: "assets" | "findings" | "alerts") {
+  return useQuery({
+    queryKey: ["views", page],
+    queryFn: async (): Promise<SavedView[]> => {
+      const res = await api.get<{ items: A.SavedViewRow[] }>(`/views?page=${page}`);
+      return (res.items ?? []).map((v) => ({
+        id: v.id, page: v.page, name: v.name, query: v.query, createdAt: v.created_at,
+      }));
+    },
+  });
+}
+
+export function useCreateSavedView(page: "assets" | "findings" | "alerts") {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (v: { name: string; query: string }) => api.post<A.SavedViewRow>("/views", { ...v, page }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["views", page] }),
+  });
+}
+
+export function useDeleteSavedView(page: "assets" | "findings" | "alerts") {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.del<void>(`/views/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["views", page] }),
+  });
+}
+
+export interface IngestToken {
+  id: string
+  name: string
+  prefix?: string
+  createdAt: string
+  revokedAt?: string
+  lastUsedAt?: string
+}
+
+export function useIngestTokens() {
+  return useQuery({
+    queryKey: ["ingest-tokens"],
+    queryFn: async (): Promise<IngestToken[]> => {
+      const res = await api.get<{ items: A.IngestTokenRow[] }>("/events/tokens");
+      return (res.items ?? []).map((t) => ({
+        id: t.id, name: t.name, prefix: t.prefix, createdAt: t.created_at,
+        revokedAt: t.revoked_at, lastUsedAt: t.last_used_at,
+      }));
+    },
+  });
+}
+
+export function useCreateIngestToken() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => api.post<{ token: A.IngestTokenRow; token_plain: string }>("/events/tokens", { name }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["ingest-tokens"] }),
+  });
+}
+
+export function useRevokeIngestToken() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.del<void>(`/events/tokens/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["ingest-tokens"] }),
+  });
+}
+
+export function useTestIngest() {
+  return useMutation({
+    mutationFn: (source: "suricata" | "zeek" | "snort") => api.post<{ accepted: number; synthetic: boolean }>("/events/test-ingest", { source }),
+  });
+}
+
+export interface Integration {
+  kind: string
+  configured: boolean
+  config?: Record<string, unknown>
+  secretMasked?: string
+}
+
+export function useIntegration(kind: "github" | "jira" | "aws") {
+  return useQuery({
+    queryKey: ["integration", kind],
+    queryFn: async (): Promise<Integration> => {
+      const res = await api.get<{ configured: boolean; integration?: A.IntegrationRow }>(`/integrations/${kind}`);
+      return {
+        kind, configured: !!res.configured, config: res.integration?.config,
+        secretMasked: res.integration?.secret_masked,
+      };
+    },
+  });
+}
+
+export function useUpsertIntegration(kind: "github" | "jira" | "aws") {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { config: Record<string, unknown>; secret?: string }) =>
+      api.put<{ configured: boolean }>(`/integrations/${kind}`, body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["integration", kind] }),
+  });
+}
+
+export function useAWSSync() {
+  return useMutation({
+    mutationFn: () => api.post<{ created: number; updated: number }>("/integrations/aws/sync", {}),
+  });
+}
+
+export function useFindingHandoff() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (input: { findingId: string; tracker: "github" | "jira" }) =>
+      api.post<{ tracker: string; key: string; url: string }>(`/findings/${input.findingId}/handoff`, { tracker: input.tracker }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["findings"] });
+      qc.invalidateQueries({ queryKey: ["metrics"] });
+    },
+  });
+}
+
+export function useHandoffRefresh() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (findingId: string) =>
+      api.post<{ state: string; resolved: boolean }>(`/findings/${findingId}/handoff/refresh`, {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["findings"] }),
+  });
+}
+
+export interface SSOProvider {
+  organizationId: string
+  organizationName: string
+}
+
+export function useSSOProviders() {
+  return useQuery({
+    queryKey: ["sso-providers"],
+    queryFn: async (): Promise<SSOProvider[]> => {
+      const res = await api.get<{ items: A.SSOProviderRow[] }>("/auth/sso/providers");
+      return (res.items ?? []).map((p) => ({ organizationId: p.organization_id, organizationName: p.organization_name }));
+    },
+    enabled: false, // fetched on demand by the login page
+  });
+}
+
+export async function startOIDC(organizationId: string): Promise<string> {
+  const res = await api.post<{ redirect?: string }>("/auth/oidc/start", { organization_id: organizationId });
+  return res.redirect ?? "";
+}
+
+export interface SSOConfig {
+  configured: boolean
+  issuer?: string
+  clientId?: string
+  groupsClaim?: string
+  roleMappings?: Record<string, string>
+  defaultRole?: string
+  allowJIT?: boolean
+  enabled?: boolean
+  clientSecretMasked?: string
+}
+
+export function useOrgSSO() {
+  return useQuery({
+    queryKey: ["sso"],
+    queryFn: async (): Promise<SSOConfig> => {
+      const res = await api.get<{ configured: boolean; sso?: A.SSOConfigRow }>("/auth/sso");
+      return {
+        configured: !!res.configured,
+        issuer: res.sso?.issuer, clientId: res.sso?.client_id, groupsClaim: res.sso?.groups_claim,
+        roleMappings: res.sso?.role_mappings, defaultRole: res.sso?.default_role,
+        allowJIT: res.sso?.allow_jit, enabled: res.sso?.enabled, clientSecretMasked: res.sso?.client_secret_masked,
+      };
+    },
+  });
+}
+
+export function useUpsertSSO() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { issuer: string; client_id: string; client_secret?: string; groups_claim?: string; role_mappings?: Record<string, string>; default_role?: string; allow_jit?: boolean; enabled?: boolean }) =>
+      api.put<{ configured: boolean }>("/auth/sso", body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sso"] }),
+  });
+}
+
+export function useDeleteSSO() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.del<void>("/auth/sso"),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["sso"] }),
   });
 }

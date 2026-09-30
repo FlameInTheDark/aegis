@@ -30,6 +30,10 @@ Hard rules enforced by the code and verified by tests:
 | `POST /auth/refresh` | **cookie** + `X-Requested-With` | Rotates the refresh token, returns a fresh access JWT. Rate-limited 120/min. Also serves as the session-restore endpoint on page load. |
 | `POST /auth/logout` | **cookie** + `X-Requested-With` | Revokes the session family, clears the cookie. Idempotent. |
 | `GET /auth/me` | Bearer | Profile + org memberships. |
+| `POST /auth/switch-organization` | Bearer | Re-points the session family at a verified membership and mints a fresh access token; the switch is audited. |
+| `GET /auth/sso/providers` | public | Returns the SSO-enabled organizations with their issuer display names (drives the login-page SSO buttons). |
+| `POST /auth/oidc/start` · `GET /auth/oidc/callback` | public | OIDC authorization-code flow; details in §8. |
+| `GET /auth/sso` · `PUT /auth/sso` · `DELETE /auth/sso` | Bearer (`owner`) | Read, configure and remove the org's OIDC connection; the client secret is write-only and never returned. |
 | all other `/api/v1` | Bearer | Access-token middleware; 401 on invalid/expired. |
 
 ## 3. Rotation, grace window, reuse detection
@@ -139,3 +143,25 @@ initializing ──restore ok──▶ authenticated ──logout / session lost
  expired-token rejection.
 - `scripts/e2e-features.sh`: concurrent refresh race with two cookie
  jars, both renewed tokens authenticate, no refresh_token in any body.
+
+## 8. OIDC single sign-on (first slice)
+
+An organization can delegate credential checks to one identity provider
+(Issuer, Client ID, Client Secret in `org_sso`, migration `0046`) while
+Aegis keeps owning sessions and authorization:
+
+- `internal/oidc` implements discovery, the authorization-code exchange
+ and ID-token verification (RS256/ES256 against a cached JWKS, `iss` /
+ `aud` / expiry checks, state + nonce double-submit). SAML and TOTP are
+ deliberately later slices.
+- The flow reuses the local session machinery: a verified callback
+ creates the same session row + refresh cookie as a password login, so
+ rotation, reuse detection and logout apply unchanged.
+- **Provisioning is JIT and read-only**: the IdP group claim maps onto
+ the five Aegis roles through an explicit mapping with a default of
+ `viewer`; the `owner` role is never grantable via claims. Membership in
+ the target organization is enforced — an IdP account with no membership
+ is rejected (or provisioned as `viewer` when the org enables JIT).
+- A local break-glass `owner` with the 12-character password policy
+ always remains, so a misconfigured IdP cannot lock the org out. Every
+ SSO configuration change is audited.

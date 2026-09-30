@@ -40,12 +40,20 @@ func (a *App) handleListAlerts(c *fiber.Ctx) error {
 		return he
 	}
 	pq := ParsePageQuery(c)
+	siteID, ferr := uuidFilterParam(c.Query("site_id"))
+	if ferr != nil {
+		return ferr
+	}
+	assetID, ferr := uuidFilterParam(c.Query("asset_id"))
+	if ferr != nil {
+		return ferr
+	}
 	items, total, err := a.svc.Alerts.List(Context(c), claims.OrganizationID, pg.OccurrenceListFilter{
 		State:     c.Query("state", "active"),
 		Severity:  c.Query("severity"),
 		TriggerID: c.Query("trigger_id"),
-		SiteID:    c.Query("site_id"),
-		AssetID:   c.Query("asset_id"),
+		SiteID:    siteID,
+		AssetID:   assetID,
 		Search:    c.Query("q"),
 		Limit:     pq.Limit, Page: pq.Page,
 	})
@@ -604,12 +612,14 @@ func (a *App) handleCreateDestination(c *fiber.Ctx) error {
 		return he
 	}
 	var req struct {
-		Name        string   `json:"name"`
-		Kind        string   `json:"kind"`
-		URL         string   `json:"url"`
-		Events      []string `json:"events"`
-		MinSeverity string   `json:"min_severity"`
-		Enabled     bool     `json:"enabled"`
+		Name        string          `json:"name"`
+		Kind        string          `json:"kind"`
+		URL         string          `json:"url"`
+		Events      []string        `json:"events"`
+		MinSeverity string          `json:"min_severity"`
+		Enabled     bool            `json:"enabled"`
+		Config      json.RawMessage `json:"config"`
+		Secret      string          `json:"secret"`
 	}
 	if err := c.BodyParser(&req); err != nil || req.Name == "" {
 		return BadRequest("name is required")
@@ -618,12 +628,17 @@ func (a *App) handleCreateDestination(c *fiber.Ctx) error {
 	if kind == "" {
 		kind = domain.DestinationWebhook
 	}
-	if kind != domain.DestinationWebhook && kind != domain.DestinationInApp {
-		return BadRequest("kind must be webhook or in_app")
+	if kind != domain.DestinationWebhook && kind != domain.DestinationInApp && kind != domain.DestinationEmail {
+		return BadRequest("kind must be webhook, email or in_app")
 	}
 	if kind == domain.DestinationWebhook {
 		if _, err := alerting.SafeWebhookURL(req.URL, false); err != nil {
 			return ValidationError("invalid webhook url: " + err.Error())
+		}
+	}
+	if kind == domain.DestinationEmail {
+		if _, err := domain.ParseEmailConfig(req.Config); err != nil {
+			return BadRequest(err.Error())
 		}
 	}
 	for _, e := range req.Events {
@@ -638,8 +653,13 @@ func (a *App) handleCreateDestination(c *fiber.Ctx) error {
 	d := &domain.Destination{
 		OrgID: claims.OrganizationID, Kind: kind, Name: req.Name, URL: req.URL,
 		Secret: newDestinationSecret(), Events: req.Events, MinSeverity: minSev,
-		Enabled: req.Enabled, CreatedBy: claims.Subject,
+		Enabled: req.Enabled, CreatedBy: claims.Subject, Config: req.Config,
 		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	if kind == domain.DestinationEmail && req.Secret != "" {
+		// Email: the operator brings the SMTP submission credential;
+		// the generated whsec_ value would be meaningless.
+		d.Secret = req.Secret
 	}
 	if err := a.svc.AlertDestinations.Create(Context(c), d); err != nil {
 		return Internal("destination create failed")
@@ -679,18 +699,27 @@ func (a *App) handleUpdateDestination(c *fiber.Ctx) error {
 		return NotFound("destination not found")
 	}
 	var req struct {
-		Name        *string   `json:"name"`
-		URL         *string   `json:"url"`
-		Events      *[]string `json:"events"`
-		MinSeverity *string   `json:"min_severity"`
-		Enabled     *bool     `json:"enabled"`
-		Secret      *string   `json:"secret"`
+		Name        *string         `json:"name"`
+		URL         *string         `json:"url"`
+		Events      *[]string       `json:"events"`
+		MinSeverity *string         `json:"min_severity"`
+		Enabled     *bool           `json:"enabled"`
+		Secret      *string         `json:"secret"`
+		Config      json.RawMessage `json:"config"`
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return BadRequest("invalid body")
 	}
 	if req.Name != nil {
 		existing.Name = *req.Name
+	}
+	if req.Config != nil {
+		if existing.Kind == domain.DestinationEmail {
+			if _, err := domain.ParseEmailConfig(req.Config); err != nil {
+				return BadRequest(err.Error())
+			}
+		}
+		existing.Config = req.Config
 	}
 	if req.URL != nil {
 		if _, err := alerting.SafeWebhookURL(*req.URL, false); err != nil && existing.Kind == domain.DestinationWebhook {
@@ -767,7 +796,7 @@ func (a *App) handleTestDestination(c *fiber.Ctx) error {
 	id := ids.New()
 	_, derr := a.svc.DB.Pool.Exec(Context(c),
 		`INSERT INTO alert_deliveries (id, organization_id, occurrence_id, destination_id, kind, status, idempotency_key, payload, created_at)
-		 VALUES ($1,$2,$3,$4,'test','pending',$5,$6,now())`,
+                 VALUES ($1,$2,$3,$4,'test','pending',$5,$6,now())`,
 		id, claims.OrganizationID, testOccID, d.ID, "test:"+id, payload)
 	if derr != nil {
 		return Internal("test delivery enqueue failed")

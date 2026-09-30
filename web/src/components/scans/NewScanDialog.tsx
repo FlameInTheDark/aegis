@@ -2,6 +2,7 @@ import * as React from "react";
 import { CalendarClock, Check, ChevronDown, Copy, Cpu, HelpCircle, KeyRound, Play, Radar, ShieldQuestion, TriangleAlert, Plus, Trash2 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { api } from "@/lib/api";
 import { colorOf, iconOf, useGroups } from "@/lib/groups";
 import type { ScanEngine } from "@/data/types";
 import type * as A from "@/lib/api-types";
@@ -42,6 +43,7 @@ const SCHEDULE_PRESETS = [
   { value: "0 3 * * 1", label: "Weekly — Monday 03:00" },
   { value: "0 3 * * *", label: "Daily — 03:00" },
   { value: "0 3 1 * *", label: "Monthly — 1st 03:00" },
+  { value: "@custom", label: "Custom cron…" },
 ];
 
 export function NewScanDialog({
@@ -73,6 +75,27 @@ export function NewScanDialog({
   const [denylist, setDenylist] = React.useState("");
   const [schedule, setSchedule] = React.useState(false);
   const [cron, setCron] = React.useState(SCHEDULE_PRESETS[0].value);
+  const [customCron, setCustomCron] = React.useState("");
+  const [preview, setPreview] = React.useState<{ runs?: string[]; error?: string } | null>(null);
+  const isCustom = cron === "@custom";
+  const effectiveCron = isCustom ? customCron.trim() : cron;
+  React.useEffect(() => {
+    if (!schedule) return;
+    const expr = effectiveCron;
+    if (!expr) {
+      setPreview(null);
+      return;
+    }
+    const t = setTimeout(async () => {
+      try {
+        const res = await api.post<{ next_runs: string[] }>("/schedules/preview", { cron: expr });
+        setPreview({ runs: res.next_runs ?? [] });
+      } catch (e) {
+        setPreview({ error: (e as Error).message });
+      }
+    }, 350);
+    return () => clearTimeout(t);
+  }, [schedule, effectiveCron]);
   const [advanced, setAdvanced] = React.useState(false);
   const [copied, setCopied] = React.useState(false);
   const [confirmElevated, setConfirmElevated] = React.useState(false);
@@ -180,7 +203,8 @@ export function NewScanDialog({
       }));
       input.ssh_insecure_host_key = sshInsecure || undefined;
     }
-    onCreate(input, { scheduleCron: schedule ? cron : undefined });
+    const cronValid = !!effectiveCron && !preview?.error;
+    onCreate(input, { scheduleCron: schedule && cronValid ? effectiveCron : undefined });
   };
 
   return (
@@ -524,6 +548,22 @@ export function NewScanDialog({
                     ))}
                   </SelectContent>
                 </Select>
+                {isCustom && (
+                  <Input
+                    value={customCron}
+                    onChange={(e) => setCustomCron(e.target.value)}
+                    placeholder="0 9-17/2 * * mon-fri  —  minute hour day month weekday"
+                    className="h-8 font-mono text-xs"
+                  />
+                )}
+                {schedule && effectiveCron && preview?.error && (
+                  <p className="text-[11px] text-destructive">Invalid schedule: {preview.error}</p>
+                )}
+                {schedule && effectiveCron && !preview?.error && (preview?.runs?.length ?? 0) > 0 && (
+                  <p className="text-[11px] text-muted-foreground">
+                    Next runs: {preview!.runs!.slice(0, 3).map((r) => new Date(r).toLocaleString()).join(" · ")}
+                  </p>
+                )}
                 <p className="text-[11px] text-muted-foreground">Also creates a schedule that re-runs this profile on the chosen cadence (site + current targets as scope).</p>
               </div>
             )}

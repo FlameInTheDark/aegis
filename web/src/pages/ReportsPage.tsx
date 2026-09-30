@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Download, FileBarChart, FileText, Layers, Loader2, MoreHorizontal, Plus, FileSpreadsheet, FileCode2, Route, ShieldAlert, Activity, MonitorSmartphone, GitCompareArrows, Building2 } from "lucide-react";
+import { Download, FileBarChart, FileText, Layers, Loader2, MoreHorizontal, Plus, FileSpreadsheet, FileCode2, Route, ShieldAlert, Activity, MonitorSmartphone, GitCompareArrows, Building2, ListChecks } from "lucide-react";
 
 import { timeAgo } from "@/lib/utils";
 import { useRouter } from "@/lib/router";
@@ -28,6 +28,7 @@ const templates: { type: string; title: string; blurb: string; icon: React.Eleme
   { type: "scan_comparison", title: "Scan comparison", blurb: "Differential between two scans — new hosts, ports, software.", icon: GitCompareArrows },
   { type: "site_detail", title: "Site detail", blurb: "Fully detailed report about one site.", icon: Building2 },
   { type: "device_detail", title: "Device detail", blurb: "Full profile of a single asset: identity, services, software, findings.", icon: MonitorSmartphone },
+  { type: "control_posture", title: "Control posture", blurb: "Maps findings to a cited control catalog (CIS v8 / NIST CSF). Evidence mapping, not a certification.", icon: ListChecks },
 ];
 
 const formatIcon = { pdf: FileText, html: FileCode2, csv: FileSpreadsheet } as const;

@@ -17,8 +17,10 @@ jobs:
         run: go vet ./...
       - name: build
         run: go build ./...
+      # The race detector is the point of `make test`; CI must differ from
+      # the developer gate ONLY by -short, never by dropping -race.
       - name: test
-        run: go test ./... -short
+        run: go test ./... -short -race
 
   frontend:
     runs-on: ubuntu-latest
@@ -28,7 +30,38 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: "22", cache: npm, cache-dependency-path: web/package-lock.json }
       - run: npm ci
+      # Unit tests (Vitest) gate every pull request: a typecheck-clean
+      # build can still ship a broken page.
+      - run: npm test
       - run: npm run build
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: aegis
+          POSTGRES_PASSWORD: aegis-it
+          POSTGRES_DB: aegis_it
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U aegis"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      AEGIS_TEST_PG_URL: postgres://aegis:aegis-it@127.0.0.1:5432/aegis_it?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.27", cache: true }
+      # The tests that skip without AEGIS_TEST_PG_URL cover tenancy,
+      # asset merge, scan recovery and settings — the exact regression
+      # classes 1.32.x kept fixing. They run here, not as skips.
+      - name: integration tests
+        run: go test ./internal/repository/postgres/ -count=1
 
   migration-consistency:
     runs-on: ubuntu-latest
@@ -43,8 +76,20 @@ jobs:
           done
           exit $fail
 
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.27", cache: true }
+      # Installed explicitly so the Makefile's "not installed (skipped)"
+      # fallback never triggers on the runner.
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          args: --timeout 5m
+
   docker:
-    needs: [backend, frontend]
+    needs: [backend, frontend, postgres-integration, lint]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -55,13 +100,6 @@ jobs:
           context: .
           file: deploy/docker/Dockerfile.server
           push: false
-
-  swagger-staleness:
-    runs-on: ubuntu-latest
-    continue-on-error: true # enabled fully once generated docs are committed (docs/API.md)
-    steps:
-      - uses: actions/checkout@v4
-      - run: echo "regenerate with swag init and diff; fails CI when stale"
 
   commitlint:
     runs-on: ubuntu-latest

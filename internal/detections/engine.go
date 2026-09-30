@@ -18,6 +18,7 @@ import (
 	"github.com/FlameInTheDark/aegis/internal/alerting"
 	"github.com/FlameInTheDark/aegis/internal/domain"
 	"github.com/FlameInTheDark/aegis/internal/ids"
+	"github.com/FlameInTheDark/aegis/internal/observability"
 	pg "github.com/FlameInTheDark/aegis/internal/repository/postgres"
 	redisrepo "github.com/FlameInTheDark/aegis/internal/repository/redis"
 )
@@ -34,6 +35,9 @@ type Engine struct {
 	// Outbox emits detection.match.created domain events for the alert
 	// trigger engine; nil disables emission.
 	Outbox *pg.OutboxRepo
+	// Metrics increments the skipped-rule counter when the evaluator meets
+	// a rule type it cannot run; nil disables instrumentation.
+	Metrics *observability.Metrics
 }
 
 // windowDuration parses "60s", "5m", "1h".
@@ -77,8 +81,15 @@ func (e *Engine) Ingest(ctx context.Context, orgID string, events []domain.Event
 				matches = append(matches, ms...)
 			}
 		default:
-			// sequence rules: evaluated over stored match context later
-			e.Log.Debug("unsupported rule type", "type", rule.Type, "rule", rule.ID)
+			// Unknown types are REFUSED at write time (ValidateRule); reaching
+			// this branch means the catalog predates the validator or a seed
+			// shipped a new type without engine support. Count it loudly instead
+			// of silently skipping rules the operator believes are armed.
+			if e.Metrics != nil {
+				e.Metrics.DetectionRulesSkippedTotal.WithLabelValues("detections", rule.Type).Inc()
+			}
+			e.Log.Warn("unsupported rule type; rule is stored but never evaluated",
+				"type", rule.Type, "rule", rule.ID, "identifier", rule.Identifier)
 		}
 	}
 	for i := range matches {

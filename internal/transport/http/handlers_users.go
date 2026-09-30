@@ -16,9 +16,14 @@ import (
 // the self-service endpoints below.
 
 // passwordPolicy is the shared password rule for creation and changes.
+// The minimum MUST match auth.HashPassword (12 characters) and
+// docs/SECURITY-MODEL.md: a policy that accepts what the hasher rejects
+// turns user creation and password changes into confusing 500-level hash
+// errors instead of an honest 400. Enforced here so the HTTP layer answers
+// 400 with an actionable message before any hashing happens.
 func passwordPolicy(p string) error {
-	if len(p) < 10 {
-		return fiber.NewError(fiber.StatusBadRequest, "password must be at least 10 characters")
+	if len(p) < 12 {
+		return fiber.NewError(fiber.StatusBadRequest, "password must be at least 12 characters")
 	}
 	if len(p) > 128 {
 		return fiber.NewError(fiber.StatusBadRequest, "password too long")

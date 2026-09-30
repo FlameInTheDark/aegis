@@ -278,6 +278,11 @@ type Software struct {
 	Source      string    `json:"source,omitempty"`
 	FirstSeen   time.Time `json:"first_seen"`
 	LastSeen    time.Time `json:"last_seen"`
+	// Per-row advisory query status (F14): 'not_queried' | 'queried_clean'
+	// | 'queried_findings'. "Queried, clean" is evidence — the OSV query
+	// ran against this exact package/version and nothing affects it.
+	OsvStatus    string     `json:"osv_status,omitempty"`
+	OsvQueriedAt *time.Time `json:"osv_queried_at,omitempty"`
 }
 
 // PURL builds a normalized package URL from components (best-effort, no guessing).

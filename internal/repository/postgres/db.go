@@ -5,6 +5,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -169,4 +170,13 @@ func nonNil(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+// nullJSON maps an empty JSON value to SQL NULL so nullable jsonb columns
+// stay explicit; the COALESCE in the read path turns NULL back into '{}'.
+func nullJSON(raw json.RawMessage) any {
+	if len(raw) == 0 {
+		return nil
+	}
+	return []byte(raw)
 }

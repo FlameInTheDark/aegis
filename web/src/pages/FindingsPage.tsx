@@ -1,12 +1,13 @@
 import * as React from "react";
-import { Check, Search, ShieldAlert, Ticket, X } from "lucide-react";
+import { CalendarClock, Check, Search, ShieldAlert, Ticket, UserPlus, X } from "lucide-react";
 
 import { cn, timeAgo, formatDateTime } from "@/lib/utils";
 import { Link, useRouter } from "@/lib/router";
 import { assetTypeMeta } from "@/lib/domain";
 import type { Finding, FindingStatus, Severity } from "@/data/types";
 import { useScope } from "@/components/layout/AppShell";
-import { useAsset, useFindings, useFinding, useSuppressFinding, useUpdateFinding } from "@/lib/queries";
+import { useAsset, useFindings, useFinding, useSuppressFinding, useUpdateFinding, useBulkAssignFindings, useUsers , useFindingHandoff, useHandoffRefresh } from "@/lib/queries";
+import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -14,12 +15,17 @@ import { Progress } from "@/components/ui/progress";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
+import { Checkbox } from "@/components/ui/checkbox";
 import { EmptyState, KeyValue, Mono, PageHeader, SeverityBadge, severityMeta, StateBadge, TableFooterBar } from "@/components/shared";
+import { SavedViewsBar } from "@/components/saved-views/SavedViewsBar";
 import { usePageSize } from "@/lib/pagination";
 import { toast } from "@/components/ui/toaster";
 
 const statusTone = (s: FindingStatus) => (s === "open" ? "danger" : s === "in_progress" ? "primary" : s === "acknowledged" ? "warning" : s === "resolved" ? "success" : "muted");
 const statuses: FindingStatus[] = ["open", "acknowledged", "in_progress", "resolved", "accepted_risk", "false_positive"];
+/** Overdue = a due date in the past on a finding that is still active. */
+const isOverdue = (f: Finding) => f.dueDate != null && +new Date(f.dueDate) < Date.now() && !"resolved accepted_risk false_positive suppressed".split(" ").includes(f.status);
 
 export function FindingsPage() {
   const { query, navigate } = useRouter();
@@ -27,6 +33,8 @@ export function FindingsPage() {
   const [q, setQ] = React.useState(query.get("q") ?? "");
   const [sev, setSev] = React.useState(query.get("severity") ?? "all");
   const [status, setStatus] = React.useState("active");
+  const [mine, setMine] = React.useState(false);
+  const [selectedIds, setSelectedIds] = React.useState<Set<string>>(new Set());
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSizeRaw] = usePageSize("findings");
   const [detailId, setDetailId] = React.useState<string | null>(query.get("id"));
@@ -38,7 +46,13 @@ export function FindingsPage() {
 
   React.useEffect(() => {
     setPage(1);
-  }, [q, sev, status, site]);
+  }, [q, sev, status, site, mine]);
+
+  // Selection cannot survive a filter change: the rows it names may not be
+  // in the next result set, and a bulk action on invisible rows is a trap.
+  React.useEffect(() => {
+    setSelectedIds(new Set());
+  }, [q, sev, status, site, mine, page]);
 
   // a new page size always restarts at page 1 — the old page number has no
   // meaning under a different window
@@ -55,6 +69,7 @@ export function FindingsPage() {
     status: status === "active" ? undefined : status === "all" ? undefined : status,
     severity: sev,
     search: q || undefined,
+    owner: mine ? "me" : undefined,
     page,
     limit: pageSize,
   });
@@ -74,6 +89,37 @@ export function FindingsPage() {
   const activeItems = (bySevQ.data?.items ?? []).filter((f) => !["resolved", "accepted_risk", "false_positive", "suppressed"].includes(f.status));
   const bySev = (s: Severity) => activeItems.filter((f) => f.severity === s).length;
 
+  // Bulk assign (F2): assignees are org users; assignment writes user ids
+  // so "my queue" filtering stays exact even when display names collide.
+  const { user } = useAuth();
+  const usersQ = useUsers();
+  const bulkAssign = useBulkAssignFindings();
+  const allSelected = items.length > 0 && items.every((f) => selectedIds.has(f.id));
+  const toggleAll = () => {
+    setSelectedIds(allSelected ? new Set() : new Set(items.map((f) => f.id)));
+  };
+  const toggleOne = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const assignSelected = (ownerId: string) => {
+    if (!ownerId || selectedIds.size === 0) return;
+    bulkAssign.mutate(
+      { ids: [...selectedIds], owner: ownerId },
+      {
+        onSuccess: (r) => {
+          toast({ title: `Assigned ${r.updated} finding${r.updated === 1 ? "" : "s"}`, variant: "success" });
+          setSelectedIds(new Set());
+        },
+        onError: (e) => toast({ title: "Bulk assign failed", description: (e as Error).message, variant: "error" }),
+      },
+    );
+  };
+
   const closeDetail = () => {
     setDetailId(null);
     if (query.get("id")) navigate("/findings", { replace: true });
@@ -81,7 +127,11 @@ export function FindingsPage() {
 
   return (
     <div className="flex flex-col gap-4">
-      <PageHeader title="Findings" description="Actionable issues correlated per asset from scans, agents and the CVE index. Each finding carries its evidence and a confidence score." />
+      <PageHeader
+        title="Findings"
+        description="Actionable issues correlated per asset from scans, agents and the CVE index. Each finding carries its evidence and a confidence score."
+        actions={<SavedViewsBar page="findings" />}
+      />
 
       {/* Severity chips */}
       <div className="flex flex-wrap items-center gap-2">
@@ -122,7 +172,10 @@ export function FindingsPage() {
             ))}
           </SelectContent>
         </Select>
-        {(q || sev !== "all" || status !== "active") && (
+        <Button variant={mine ? "secondary" : "outline"} size="sm" className="gap-1.5" onClick={() => setMine((m) => !m)}>
+          <UserPlus className="size-3.5" /> My queue
+        </Button>
+        {(q || sev !== "all" || status !== "active" || mine) && (
           <Button
             variant="ghost"
             size="sm"
@@ -131,6 +184,7 @@ export function FindingsPage() {
               setQ("");
               setSev("all");
               setStatus("active");
+              setMine(false);
             }}
           >
             <X /> Clear
@@ -138,10 +192,36 @@ export function FindingsPage() {
         )}
       </div>
 
+      {/* Bulk assign bar (F2) */}
+      {selectedIds.size > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-primary/40 bg-primary/5 px-4 py-2.5">
+          <span className="text-sm font-medium">{selectedIds.size} selected</span>
+          <Select onValueChange={assignSelected}>
+            <SelectTrigger size="sm" className="w-[220px]">
+              <span className="text-muted-foreground">Assign to:</span>
+            </SelectTrigger>
+            <SelectContent>
+              {user && <SelectItem value={user.id}>{user.name} (me)</SelectItem>}
+              {(usersQ.data ?? []).map((u) => (
+                <SelectItem key={u.id} value={u.id} disabled={u.status === "disabled"}>
+                  {u.name} — {u.email}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button variant="ghost" size="sm" className="ml-auto text-muted-foreground" onClick={() => setSelectedIds(new Set())}>
+            <X /> Clear selection
+          </Button>
+        </div>
+      )}
+
       <div className="overflow-hidden rounded-xl border bg-card">
         <Table>
           <TableHeader>
             <TableRow className="hover:bg-transparent">
+              <TableHead className="w-8 pl-4">
+                <Checkbox checked={allSelected} onCheckedChange={toggleAll} aria-label="Select all" />
+              </TableHead>
               <TableHead className="pl-4">Severity</TableHead>
               <TableHead>Finding</TableHead>
               <TableHead>Asset</TableHead>
@@ -156,13 +236,20 @@ export function FindingsPage() {
           <TableBody>
             {items.length === 0 ? (
               <TableRow className="hover:bg-transparent">
-                <TableCell colSpan={9}>
+                <TableCell colSpan={10}>
                   <EmptyState icon={ShieldAlert} title="No findings match" description="Adjust the filters, or run a vulnerability scan to correlate new findings." />
                 </TableCell>
               </TableRow>
             ) : (
               items.map((f) => (
                 <TableRow key={f.id} className="cursor-pointer" onClick={() => setDetailId(f.id)}>
+                  <TableCell className="pl-4" onClick={(e) => e.stopPropagation()}>
+                    <Checkbox
+                      checked={selectedIds.has(f.id)}
+                      onCheckedChange={() => toggleOne(f.id)}
+                      aria-label={`Select ${f.title}`}
+                    />
+                  </TableCell>
                   <TableCell className="pl-4">
                     <SeverityBadge severity={f.severity} />
                   </TableCell>
@@ -171,6 +258,11 @@ export function FindingsPage() {
                     <div className="text-xs text-muted-foreground">
                       {f.id.slice(0, 8)} · via {f.category}
                     </div>
+                    {f.dueDate && (
+                      <div className={cn("mt-0.5 flex items-center gap-1 text-[11px]", isOverdue(f) ? "font-medium text-destructive" : "text-muted-foreground")}>
+                        <CalendarClock className="size-3" /> due {formatDateTime(f.dueDate)}
+                      </div>
+                    )}
                   </TableCell>
                   <TableCell>
                     <AssetLinkCell assetId={f.assetId} />
@@ -254,6 +346,8 @@ function FindingDetailSheet({ findingId, onClose }: { findingId: string; onClose
   const asset = assetQ.data?.asset;
   const update = useUpdateFinding();
   const suppress = useSuppressFinding();
+  const handoff = useFindingHandoff();
+  const handoffRefresh = useHandoffRefresh();
   const [suppressOpen, setSuppressOpen] = React.useState(false);
   const [reason, setReason] = React.useState("");
 
@@ -300,6 +394,63 @@ function FindingDetailSheet({ findingId, onClose }: { findingId: string; onClose
               </SheetDescription>
             </SheetHeader>
             <div className="flex flex-col gap-4 overflow-y-auto px-5 pb-5">
+              {/* F6: tracker handoff */}
+              {detail.externalKey ? (
+                <div className="rounded-lg border bg-muted/30 p-2.5">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-semibold capitalize">{detail.externalTracker} issue</p>
+                    <Button
+                      variant="outline" size="xs"
+                      onClick={() => handoffRefresh.mutate(detail.id, {
+                        onSuccess: (res) => toast({
+                          title: res.resolved ? "Tracker closed — finding resolved" : `Tracker state: ${res.state}`,
+                          variant: res.resolved ? "success" : "default",
+                        }),
+                        onError: (e) => toast({ title: "Refresh failed", description: (e as Error).message, variant: "error" }),
+                      })}
+                      disabled={handoffRefresh.isPending}
+                    >
+                      Refresh status
+                    </Button>
+                  </div>
+                  {detail.externalUrl ? (
+                    <a href={detail.externalUrl} target="_blank" rel="noreferrer" className="mt-1 block break-all font-mono text-xs underline-offset-2 hover:underline">
+                      {detail.externalUrl}
+                    </a>
+                  ) : (
+                    <Mono className="text-xs">{detail.externalKey}</Mono>
+                  )}
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="outline" size="sm">
+                        <Ticket className="size-4" /> Create issue
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="start">
+                      <DropdownMenuItem
+                        onClick={() => handoff.mutate({ findingId: detail.id, tracker: "github" }, {
+                          onSuccess: (res) => toast({ title: `Issue ${res.key} created`, description: res.url, variant: "success" }),
+                          onError: (e) => toast({ title: "Create failed", description: (e as Error).message, variant: "error" }),
+                        })}
+                      >
+                        GitHub Issues
+                      </DropdownMenuItem>
+                      <DropdownMenuItem
+                        onClick={() => handoff.mutate({ findingId: detail.id, tracker: "jira" }, {
+                          onSuccess: (res) => toast({ title: `Issue ${res.key} created`, description: res.url, variant: "success" }),
+                          onError: (e) => toast({ title: "Create failed", description: (e as Error).message, variant: "error" }),
+                        })}
+                      >
+                        Jira
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                  <span className="text-[11px] text-muted-foreground">Pushes title, CVE, asset and evidence to the tracker (configure in Settings → Integrations).</span>
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3">
                 <div className="grid gap-1.5">
                   <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Status</span>
@@ -326,6 +477,22 @@ function FindingDetailSheet({ findingId, onClose }: { findingId: string; onClose
                       const v = e.target.value.trim();
                       if (v !== (detail.assignee ?? "")) {
                         update.mutate({ id: detail.id, owner: v });
+                      }
+                    }}
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Due date</span>
+                  <Input
+                    type="datetime-local"
+                    defaultValue={detail.dueDate ? detail.dueDate.slice(0, 16) : ""}
+                    className="h-8 text-[13px]"
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      if (!detail.dueDate && !v) return;
+                      const next = v ? new Date(v).toISOString() : "";
+                      if (next !== (detail.dueDate ?? "")) {
+                        update.mutate({ id: detail.id, dueDate: next });
                       }
                     }}
                   />

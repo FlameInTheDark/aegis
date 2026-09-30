@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"strings"
 	"time"
 
@@ -915,60 +914,21 @@ func (o *Orchestrator) RunDueSchedules(ctx context.Context, now time.Time) int {
 	return n
 }
 
-// NextRunAfter computes the next cron run (simple CRON subset:
-// "M H * * *" daily/time-of-day or "@every 1h" style; documented assumption).
+// NextRunAfter computes the next run of a schedule expression. It accepts
+// the full documented cron subset (five fields including day-of-month and
+// day-of-week, see cron.go) and the "@every <duration>" form. Unparseable
+// expressions fall back to a conservative daily schedule; use ValidateCron
+// at the API boundary to reject them instead.
 func NextRunAfter(now time.Time, cron string) time.Time {
-	if after, ok := parseEvery(now, cron); ok {
-		return after
+	spec, err := ParseCron(cron)
+	if err != nil {
+		return now.Add(24 * time.Hour)
 	}
-	fields := splitFields(cron)
-	if len(fields) == 5 {
-		if m, h, ok := parseCronDaily(fields); ok {
-			next := time.Date(now.Year(), now.Month(), now.Day(), h, m, 0, 0, now.Location())
-			if !next.After(now) {
-				next = next.Add(24 * time.Hour)
-			}
-			return next
-		}
+	next := spec.NextAfter(now)
+	if next.IsZero() {
+		return now.Add(24 * time.Hour)
 	}
-	return now.Add(24 * time.Hour) // conservative default: daily
-}
-
-func parseEvery(now time.Time, cron string) (time.Time, bool) {
-	if len(cron) > 7 && cron[:7] == "@every " {
-		if d, err := time.ParseDuration(cron[7:]); err == nil && d >= time.Minute {
-			return now.Add(d), true
-		}
-	}
-	return time.Time{}, false
-}
-
-func splitFields(cron string) []string {
-	var out []string
-	cur := ""
-	for _, r := range cron {
-		if r == ' ' {
-			if cur != "" {
-				out = append(out, cur)
-				cur = ""
-			}
-			continue
-		}
-		cur += string(r)
-	}
-	if cur != "" {
-		out = append(out, cur)
-	}
-	return out
-}
-
-func parseCronDaily(f []string) (int, int, bool) {
-	m, err1 := strconv.Atoi(f[0])
-	h, err2 := strconv.Atoi(f[1])
-	if err1 != nil || err2 != nil || m < 0 || m > 59 || h < 0 || h > 23 {
-		return 0, 0, false
-	}
-	return m, h, true
+	return next
 }
 
 func (o *Orchestrator) bumpStats(scanID string, fn func(*domain.ScanStats)) {

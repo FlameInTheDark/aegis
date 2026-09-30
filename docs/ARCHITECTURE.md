@@ -9,9 +9,9 @@ Aegis is a **modular monolith with independently deployable workers** — not a 
 | Binary | Role | Talks to |
 |---|---|---|
 | `server` | Control plane: HTTP API `/api/v1`, gRPC agent transport, metrics | Postgres, Redis, NATS, ClickHouse, S3 |
-| `worker` | Background jobs: telemetry ingestion, report rendering, schedules, housekeeping | Postgres, Redis, NATS, ClickHouse |
+| `worker` | Background jobs: telemetry ingestion, detection evaluation, alert-trigger delivery, report rendering, schedules, housekeeping | Postgres, Redis, NATS, ClickHouse |
 | `scanner` | Distributed active scan execution (site-local) | Postgres, NATS, nmap binary |
-| `agent` | Endpoint inventory + typed task execution | server (gRPC/mTLS) |
+| `aegis-connector` | External endpoint/collection agent: enrollment, typed connector tasks, telemetry (the single external binary; agent transport is served by `server`) | server (gRPC/mTLS) |
 | `feed-worker` | Vulnerability feed synchronization | Postgres, upstream feeds, S3 |
 
 ## Data flow: discovery to finding
@@ -51,4 +51,4 @@ Versioned payloads; consumers are idempotent (at-least-once delivery).
 
 ## Frontend
 
-React 18 + TypeScript + Vite + Tailwind, TanStack Query for server state, ECharts theming shared across chart components. Dense Linear-inspired dark UI with command palette and keyboard navigation. Cursor pagination on events, offset pagination elsewhere; the browser never holds unbounded data.
+React 19 + TypeScript + Vite + Tailwind, TanStack Query for server state, ECharts theming shared across chart components (the single chart library — `components/charts/Chart.tsx`). Dense Linear-inspired dark UI with command palette and keyboard navigation. Cursor pagination on events, offset pagination elsewhere; the browser never holds unbounded data.

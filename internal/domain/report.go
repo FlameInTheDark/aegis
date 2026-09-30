@@ -19,6 +19,9 @@ const (
 	ReportSiteDetail ReportType = "site_detail"
 	// ReportDeviceDetail is the fully detailed report about one device.
 	ReportDeviceDetail ReportType = "device_detail"
+	// ReportControlPosture maps findings to a small, versioned control
+	// catalog (F13). It is evidence mapping, never a certification.
+	ReportControlPosture ReportType = "control_posture"
 )
 
 // ReportFormat enumerates output formats.

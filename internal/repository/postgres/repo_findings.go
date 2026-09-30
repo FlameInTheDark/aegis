@@ -68,9 +68,11 @@ func NewFindingRepo(db *DB) *FindingRepo { return &FindingRepo{db: db} }
 // scan empty strings and the row count never changes.
 const findingCols = `f.id, f.organization_id, f.asset_id::text, f.service_id::text, f.software_id::text,
 COALESCE(f.cve_id,'') AS cve_id, COALESCE(f.osv_id,'') AS osv_id, f.title, f.match_type, f.confidence, f.risk_score, f.severity, f.status, f.owner, f.notes,
-f.remediation, f.suppressed_until, f.first_seen, f.last_seen, f.resolved_at, f.created_at, f.updated_at,
+f.remediation, f.suppressed_until, f.due_date, f.first_seen, f.last_seen, f.resolved_at, f.created_at, f.updated_at,
 COALESCE(NULLIF(sw.name, ''), NULLIF(svc.product, ''), '') AS product,
-COALESCE(NULLIF(sw.version, ''), NULLIF(svc.detected_version, ''), '') AS version`
+COALESCE(NULLIF(sw.version, ''), NULLIF(svc.detected_version, ''), '') AS version,
+COALESCE(f.external_tracker,'') AS external_tracker, COALESCE(f.external_key,'') AS external_key,
+COALESCE(f.external_url,'') AS external_url, f.external_synced_at`
 
 const findingJoins = ` LEFT JOIN services svc ON svc.id = f.service_id LEFT JOIN software sw ON sw.id = f.software_id`
 
@@ -78,9 +80,10 @@ func scanFinding(row scanner) (*domain.Finding, error) {
 	var f domain.Finding
 	err := row.Scan(&f.ID, &f.OrganizationID, &f.AssetID, &f.ServiceID, &f.SoftwareID,
 		&f.CVEID, &f.OSVID, &f.Title, &f.MatchType, &f.Confidence, &f.RiskScore,
-		&f.Severity, &f.Status, &f.Owner, &f.Notes, &f.Remediation, &f.SuppressedUntil,
+		&f.Severity, &f.Status, &f.Owner, &f.Notes, &f.Remediation, &f.SuppressedUntil, &f.DueDate,
 		&f.FirstSeen, &f.LastSeen, &f.ResolvedAt, &f.CreatedAt, &f.UpdatedAt,
-		&f.Product, &f.Version)
+		&f.Product, &f.Version,
+		&f.ExternalTracker, &f.ExternalKey, &f.ExternalURL, &f.ExternalSyncedAt)
 	if err != nil {
 		return nil, mapNotFound(err)
 	}
@@ -145,8 +148,10 @@ type FindingFilter struct {
 	MinRisk  float64
 	KEV      bool
 	Search   string
-	Limit    int
-	Page     int
+	// Owner restricts the listing to one assignee ("my queue", F2).
+	Owner string
+	Limit int
+	Page  int
 }
 
 func (r *FindingRepo) List(ctx context.Context, f FindingFilter) ([]domain.Finding, int64, error) {
@@ -170,6 +175,9 @@ func (r *FindingRepo) List(ctx context.Context, f FindingFilter) ([]domain.Findi
 	}
 	if f.Severity != "" {
 		where["f.severity"] = f.Severity
+	}
+	if f.Owner != "" {
+		where["f.owner"] = f.Owner
 	}
 	conds := []squirrel.Sqlizer{where}
 	if f.MinRisk > 0 {
@@ -265,6 +273,74 @@ func (r *FindingRepo) SetOwner(ctx context.Context, orgID, id, owner string) err
 		Where(squirrel.Eq{"id": id, "organization_id": orgID})
 	_, err := r.db.Exec(ctx, q)
 	return err
+}
+
+// SetDueDate stores (or clears, for a nil due) the investigation deadline.
+func (r *FindingRepo) SetDueDate(ctx context.Context, orgID, id string, due *time.Time) error {
+	q := r.db.Update("findings").
+		Set("due_date", due).
+		Set("updated_at", time.Now().UTC()).
+		Where(squirrel.Eq{"id": id, "organization_id": orgID})
+	_, err := r.db.Exec(ctx, q)
+	return err
+}
+
+// MarkHandoff records the external tracker issue a finding was pushed to
+// (F6). One-way in the first slice: the tracker link is provenance, and
+// refresh maps closure back.
+func (r *FindingRepo) MarkHandoff(ctx context.Context, orgID, id, tracker, key, url string) error {
+	q := r.db.Update("findings").
+		Set("external_tracker", tracker).
+		Set("external_key", key).
+		Set("external_url", url).
+		Set("external_synced_at", time.Now().UTC()).
+		Set("updated_at", time.Now().UTC()).
+		Where(squirrel.Eq{"id": id, "organization_id": orgID})
+	_, err := r.db.Exec(ctx, q)
+	return err
+}
+
+// MarkHandoffSynced bumps the last handoff sync time without changing the
+// linked issue.
+func (r *FindingRepo) MarkHandoffSynced(ctx context.Context, orgID, id string) error {
+	q := r.db.Update("findings").
+		Set("external_synced_at", time.Now().UTC()).
+		Where(squirrel.Eq{"id": id, "organization_id": orgID})
+	_, err := r.db.Exec(ctx, q)
+	return err
+}
+
+// BulkAssign sets one owner on many findings in a single statement.
+// Returns the number of rows actually updated (org-scoped).
+func (r *FindingRepo) BulkAssign(ctx context.Context, orgID string, ids []string, owner string) (int, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	q := r.db.Update("findings").
+		Set("owner", owner).
+		Set("updated_at", time.Now().UTC()).
+		Where(squirrel.And{squirrel.Eq{"organization_id": orgID}, squirrel.Eq{"id": ids}})
+	cmd, err := r.db.Exec(ctx, q)
+	if err != nil {
+		return 0, err
+	}
+	return int(cmd.RowsAffected()), nil
+}
+
+// OverdueCount aggregates active findings past their due date for the
+// Overview "overdue" surface (F2): due_date < now() and the status is
+// still one of the active triage states. Suppressed/accepted findings
+// never read as overdue.
+func (r *FindingRepo) OverdueCount(ctx context.Context, orgID string) (int64, error) {
+	q := r.db.Select("count(*)").From("findings").
+		Where(squirrel.And{
+			squirrel.Eq{"organization_id": orgID},
+			squirrel.Expr("due_date IS NOT NULL AND due_date < now()"),
+			squirrel.Expr("status IN ('open','acknowledged','in_progress')"),
+		})
+	var n int64
+	err := r.db.QueryRow(ctx, q).Scan(&n)
+	return n, err
 }
 
 // ListForAsset returns open findings of an asset.

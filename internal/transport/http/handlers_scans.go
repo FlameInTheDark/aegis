@@ -165,8 +165,12 @@ func authzHasPerm(claims *authClaimsDef, perm domain.Permission) bool {
 func (a *App) handleListScans(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
 	page, limit := pageParams(c)
+	siteID, ferr := uuidFilterParam(c.Query("site_id"))
+	if ferr != nil {
+		return ferr
+	}
 	items, total, err := a.svc.Scans.List(Context(c), pg.ScanListFilter{
-		OrgID: claims.OrganizationID, SiteID: c.Query("site_id"),
+		OrgID: claims.OrganizationID, SiteID: siteID,
 		State: c.Query("state"), Limit: limit, Page: page,
 	})
 	if err != nil {
@@ -273,6 +277,9 @@ func (a *App) handleCreateSchedule(c *fiber.Ctx) error {
 	if _, ok := domain.Profiles[profile]; !ok {
 		return BadRequest("unknown profile")
 	}
+	if err := scanning.ValidateCron(req.CRON); err != nil {
+		return BadRequest("invalid cron: " + err.Error())
+	}
 	s := &domain.ScanSchedule{
 		ID: idsNew(), OrganizationID: claims.OrganizationID, SiteID: req.SiteID,
 		Name: req.Name, Profile: profile, CRON: req.CRON, Scope: req.Scope,
@@ -293,6 +300,70 @@ func (a *App) handleDeleteSchedule(c *fiber.Ctx) error {
 		return NotFound("schedule not found")
 	}
 	return c.SendStatus(204)
+}
+
+// handlePreviewSchedule surfaces the next three run times of a schedule
+// expression so a bad expression is visible before it is saved.
+func (a *App) handlePreviewSchedule(c *fiber.Ctx) error {
+	var req struct {
+		CRON string `json:"cron"`
+	}
+	if err := c.BodyParser(&req); err != nil || req.CRON == "" {
+		return BadRequest("cron is required")
+	}
+	runs, err := scanning.NextRunsAfter(time.Now(), req.CRON, 3)
+	if err != nil {
+		return BadRequest("invalid cron: " + err.Error())
+	}
+	return c.JSON(fiber.Map{"next_runs": runs})
+}
+
+// handleListChanges serves the org-wide change timeline (F7): filterable by
+// site, change type and time window, each row linking back to the scan and
+// asset that produced it.
+func (a *App) handleListChanges(c *fiber.Ctx) error {
+	claims := a.claimsFrom(c)
+	siteID, err := uuidFilterParam(c.Query("site_id"))
+	if err != nil {
+		return err
+	}
+	changeType := c.Query("type")
+	if changeType == "all" {
+		changeType = ""
+	}
+	filter := pg.ChangeFilter{
+		SiteID: siteID,
+		Type:   changeType,
+	}
+	if v := c.Query("from"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return BadRequest("from must be RFC3339")
+		}
+		filter.From = &t
+	}
+	if v := c.Query("to"); v != "" {
+		t, err := time.Parse(time.RFC3339, v)
+		if err != nil {
+			return BadRequest("to must be RFC3339")
+		}
+		filter.To = &t
+	}
+	if v := c.Query("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			filter.Limit = n
+		}
+	}
+	if v := c.Query("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			filter.Offset = n
+		}
+	}
+	items, total, err := a.svc.Changes.ListFiltered(Context(c), claims.OrganizationID, filter)
+	if err != nil {
+		return Internal("changes list failed")
+	}
+	return c.JSON(fiber.Map{"items": items, "total": total})
 }
 
 // handleScanLogs serves the persisted job log tail of one scan. History

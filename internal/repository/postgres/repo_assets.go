@@ -663,7 +663,7 @@ func (r *SoftwareRepo) Upsert(ctx context.Context, s *domain.Software) error {
 }
 
 func (r *SoftwareRepo) ListForAsset(ctx context.Context, assetID string) ([]domain.Software, error) {
-	q := r.db.Select("id, asset_id, name, version, version_norm, vendor, ecosystem, purl, cpes, source, first_seen, last_seen").
+	q := r.db.Select("id, asset_id, name, version, version_norm, vendor, ecosystem, purl, cpes, source, first_seen, last_seen, osv_status, osv_queried_at").
 		From("software").Where(squirrel.Eq{"asset_id": assetID}).OrderBy("name")
 	rows, err := r.db.Query(ctx, q)
 	if err != nil {
@@ -674,7 +674,7 @@ func (r *SoftwareRepo) ListForAsset(ctx context.Context, assetID string) ([]doma
 	for rows.Next() {
 		var s domain.Software
 		if err := rows.Scan(&s.ID, &s.AssetID, &s.Name, &s.Version, &s.VersionNorm, &s.Vendor, &s.Ecosystem,
-			&s.PURL, &s.CPEs, &s.Source, &s.FirstSeen, &s.LastSeen); err != nil {
+			&s.PURL, &s.CPEs, &s.Source, &s.FirstSeen, &s.LastSeen, &s.OsvStatus, &s.OsvQueriedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -684,7 +684,7 @@ func (r *SoftwareRepo) ListForAsset(ctx context.Context, assetID string) ([]doma
 
 // AllPackages returns the full package inventory for matching pipelines.
 func (r *SoftwareRepo) AllPackages(ctx context.Context, orgID string) ([]domain.Software, error) {
-	q := r.db.Select("s.id, s.asset_id, s.name, s.version, s.version_norm, s.vendor, s.ecosystem, s.purl, s.cpes, s.source, s.first_seen, s.last_seen").
+	q := r.db.Select("s.id, s.asset_id, s.name, s.version, s.version_norm, s.vendor, s.ecosystem, s.purl, s.cpes, s.source, s.first_seen, s.last_seen, s.osv_status, s.osv_queried_at").
 		From("software s").
 		Join("assets a ON a.id = s.asset_id").
 		Where(squirrel.Eq{"a.organization_id": orgID})
@@ -697,7 +697,7 @@ func (r *SoftwareRepo) AllPackages(ctx context.Context, orgID string) ([]domain.
 	for rows.Next() {
 		var s domain.Software
 		if err := rows.Scan(&s.ID, &s.AssetID, &s.Name, &s.Version, &s.VersionNorm, &s.Vendor, &s.Ecosystem,
-			&s.PURL, &s.CPEs, &s.Source, &s.FirstSeen, &s.LastSeen); err != nil {
+			&s.PURL, &s.CPEs, &s.Source, &s.FirstSeen, &s.LastSeen, &s.OsvStatus, &s.OsvQueriedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -710,6 +710,17 @@ func nullStr(s string) any {
 		return nil
 	}
 	return s
+}
+
+// MarkSBOM records the provenance of an uploaded SBOM: the sha256 digest of
+// the exact document that produced the asset's source='sbom' software rows.
+func (r *AssetRepo) MarkSBOM(ctx context.Context, orgID, assetID, digest string) error {
+	q := r.db.Update("assets").
+		Set("sbom_digest", digest).
+		Set("sbom_uploaded_at", time.Now().UTC()).
+		Where(squirrel.Eq{"id": assetID, "organization_id": orgID})
+	_, err := r.db.Exec(ctx, q)
+	return err
 }
 
 // ExistsForAsset reports whether a package row already exists for an asset
@@ -728,4 +739,66 @@ func (r *SoftwareRepo) ExistsForAsset(ctx context.Context, assetID, name, versio
 		return false, "", err
 	}
 	return true, id, nil
+}
+
+// OSVPendingGroup is one distinct (ecosystem, package, match-version)
+// triple still awaiting its OSV query (F14). Grouping means one API call
+// covers every asset carrying the same package/version combination.
+type OSVPendingGroup struct {
+	Ecosystem string
+	Name      string
+	Version   string // COALESCE(version_norm, version) — the match version
+}
+
+// PendingOSVGroups returns the distinct language-ecosystem packages the OSV
+// worker has not queried yet, oldest activity first. Org scoping rides the
+// assets join; the ecosystems allowlist keeps the query set to the ones
+// the OSV API actually serves.
+func (r *SoftwareRepo) PendingOSVGroups(ctx context.Context, ecosystems []string, limit int) ([]OSVPendingGroup, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	q := r.db.Select("s.ecosystem, s.name, COALESCE(NULLIF(s.version_norm, ''), s.version) AS match_version").
+		From("software s").
+		Join("assets a ON a.id = s.asset_id").
+		Where(squirrel.Eq{"s.osv_status": "not_queried"}).
+		Where(squirrel.NotEq{"s.purl": ""}).
+		Where(squirrel.NotEq{"a.organization_id": ""}).
+		Where(squirrel.Eq{"s.ecosystem": ecosystems}).
+		GroupBy("s.ecosystem, s.name, match_version").
+		OrderBy("max(s.last_seen) DESC").
+		Limit(uint64(limit))
+	rows, err := r.db.Query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []OSVPendingGroup
+	for rows.Next() {
+		var g OSVPendingGroup
+		if err := rows.Scan(&g.Ecosystem, &g.Name, &g.Version); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// ApplyOSVResult records the outcome of one OSV query for every row sharing
+// the (ecosystem, name, match-version) triple: 'queried_findings' when the
+// cached advisories affect this version, 'queried_clean' when they do not —
+// absence of a finding after a real query is evidence.
+func (r *SoftwareRepo) ApplyOSVResult(ctx context.Context, ecosystem, name, version string, affected bool) error {
+	status := "queried_clean"
+	if affected {
+		status = "queried_findings"
+	}
+	q := r.db.Update("software").
+		Set("osv_status", status).
+		Set("osv_queried_at", time.Now().UTC()).
+		Where(squirrel.Eq{"ecosystem": ecosystem, "name": name}).
+		Where(squirrel.Expr("COALESCE(NULLIF(version_norm, ''), version) = ?", version)).
+		Where(squirrel.Eq{"osv_status": "not_queried"})
+	_, err := r.db.Exec(ctx, q)
+	return err
 }

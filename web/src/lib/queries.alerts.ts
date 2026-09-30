@@ -104,7 +104,7 @@ export interface AlertTrigger {
 
 export interface AlertDestination {
   id: string;
-  kind: "webhook" | "in_app";
+  kind: "webhook" | "email" | "in_app";
   name: string;
   url: string;
   secretMasked?: string;

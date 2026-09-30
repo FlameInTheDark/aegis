@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/FlameInTheDark/aegis/internal/detections"
 	"github.com/FlameInTheDark/aegis/internal/domain"
 	"github.com/FlameInTheDark/aegis/internal/ids"
 	ch "github.com/FlameInTheDark/aegis/internal/repository/clickhouse"
@@ -20,6 +21,9 @@ type chEventFilter = ch.EventFilter
 
 func (a *App) handleListRules(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
+	if he := a.requirePerm(c, domain.PermDetectionRead); he != nil {
+		return he
+	}
 	items, err := a.svc.Rules.List(Context(c), claims.OrganizationID)
 	if err != nil {
 		return Internal("rule list failed")
@@ -35,6 +39,11 @@ func (a *App) handleCreateRule(c *fiber.Ctx) error {
 	var rule domain.DetectionRule
 	if err := c.BodyParser(&rule); err != nil {
 		return BadRequest("invalid JSON body")
+	}
+	// Server-side canonical validation: only rules the engine can safely
+	// evaluate reach the catalog (type/window/threshold/condition allowlist).
+	if err := detections.ValidateRule(&rule); err != nil {
+		return BadRequest("rule validation failed: " + err.Error())
 	}
 	rule.ID = ids.New()
 	rule.OrgID = claims.OrganizationID
@@ -70,15 +79,31 @@ func (a *App) handleUpdateRule(c *fiber.Ctx) error {
 
 func (a *App) handleListMatches(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
+	if he := a.requirePerm(c, domain.PermDetectionRead); he != nil {
+		return he
+	}
 	page, limit := pageParams(c)
-	items, total, err := a.svc.Matches.List(Context(c), pg.MatchFilter{
+	filter := pg.MatchFilter{
 		OrgID: claims.OrganizationID, RuleID: c.Query("rule_id"),
-		Level: c.Query("level"), Limit: limit, Page: page,
-	})
+		Level: c.Query("level"), Status: c.Query("status"),
+		Search: c.Query("q"), Limit: limit, Page: page,
+	}
+	// My-queue filter (F2): assignee=me resolves server-side.
+	if c.Query("assignee") == "me" {
+		filter.Assignee = claims.Subject
+	}
+	items, total, err := a.svc.Matches.List(Context(c), filter)
 	if err != nil {
 		return Internal("match list failed")
 	}
-	return c.JSON(fiber.Map{"items": items, "total": total, "page": page, "limit": limit})
+	// Status counts are aggregated server-side (same filters minus status)
+	// so the console's triage cards stay truthful under pagination.
+	filter.Status = ""
+	counts, err := a.svc.Matches.StatusCounts(Context(c), filter)
+	if err != nil {
+		return Internal("match counts failed")
+	}
+	return c.JSON(fiber.Map{"items": items, "total": total, "page": page, "limit": limit, "counts": counts})
 }
 
 // ---------------------------------------------------------------------------
@@ -94,10 +119,21 @@ func (a *App) handleUpdateMatchStatus(c *fiber.Ctx) error {
 		return he
 	}
 	var req struct {
-		Status string `json:"status"`
+		Status   string  `json:"status"`
+		Assignee *string `json:"assignee"` // nil = leave; "" = unassign (F2)
 	}
 	if err := c.BodyParser(&req); err != nil {
 		return BadRequest("invalid request body")
+	}
+	if req.Assignee != nil {
+		if err := a.svc.Matches.SetAssignee(Context(c), claims.OrganizationID, c.Params("id"), *req.Assignee); err != nil {
+			return NotFound("match not found or assignee update failed")
+		}
+		a.svc.AuditService.Entry(Context(c), claims.OrganizationID, claims.Subject, "detection.assigned", "match:"+c.Params("id"), c.IP(), "", "success",
+			map[string]any{"assignee": *req.Assignee})
+	}
+	if req.Status == "" {
+		return c.JSON(fiber.Map{"id": c.Params("id"), "assignee": req.Assignee})
 	}
 	if !domain.ValidMatchStatus(req.Status) {
 		return BadRequest("status must be one of: new, investigating, contained, closed")

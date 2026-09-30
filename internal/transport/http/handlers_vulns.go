@@ -126,16 +126,29 @@ func (a *App) handleListFindings(c *fiber.Ctx) error {
 		return he
 	}
 	page, limit := pageParams(c)
+	siteID, ferr := uuidFilterParam(c.Query("site_id"))
+	if ferr != nil {
+		return ferr
+	}
+	assetID, ferr := uuidFilterParam(c.Query("asset_id"))
+	if ferr != nil {
+		return ferr
+	}
 	f := pg.FindingFilter{
 		OrgID:    claims.OrganizationID,
-		SiteID:   c.Query("site_id"),
-		AssetID:  c.Query("asset_id"),
+		SiteID:   siteID,
+		AssetID:  assetID,
 		Status:   c.Query("status"),
 		Severity: c.Query("severity"),
 		KEV:      c.Query("kev") == "true",
 		Search:   c.Query("search"),
 		Limit:    limit,
 		Page:     page,
+	}
+	// "My queue" (F2): owner=me resolves to the caller, never to a
+	// client supplied id - a forged owner must not redirect a queue.
+	if c.Query("owner") == "me" {
+		f.Owner = claims.Subject
 	}
 	if mr := c.QueryFloat("min_risk", -1); mr >= 0 {
 		f.MinRisk = mr
@@ -168,11 +181,41 @@ func (a *App) handleUpdateFinding(c *fiber.Ctx) error {
 		return he
 	}
 	var req struct {
-		Status string `json:"status"`
-		Reason string `json:"reason"`
+		Status  string  `json:"status"`
+		Reason  string  `json:"reason"`
+		Owner   *string `json:"owner"`    // nil = leave; "" = unassign
+		DueDate *string `json:"due_date"` // RFC3339; "" = clear
 	}
-	if err := c.BodyParser(&req); err != nil || req.Status == "" {
-		return BadRequest("status is required")
+	if err := c.BodyParser(&req); err != nil || (req.Status == "" && req.Owner == nil && req.DueDate == nil) {
+		return BadRequest("status, owner or due_date is required")
+	}
+	// Owner and due-date writes ride the same endpoint as status so the
+	// console keeps one mutation per finding; each is audited separately.
+	if req.Owner != nil {
+		if err := a.svc.Findings.SetOwner(Context(c), claims.OrganizationID, c.Params("id"), *req.Owner); err != nil {
+			return NotFound("finding not found or owner update failed")
+		}
+		a.svc.AuditService.Entry(Context(c), claims.OrganizationID, claims.Subject, "finding.assigned", "finding:"+c.Params("id"), c.IP(), "", "success",
+			map[string]any{"owner": *req.Owner})
+	}
+	if req.DueDate != nil {
+		var due *time.Time
+		if *req.DueDate != "" {
+			t, err := time.Parse(time.RFC3339, *req.DueDate)
+			if err != nil {
+				return BadRequest("due_date must be RFC3339")
+			}
+			due = &t
+		}
+		if err := a.svc.Findings.SetDueDate(Context(c), claims.OrganizationID, c.Params("id"), due); err != nil {
+			return NotFound("finding not found or due date update failed")
+		}
+		a.svc.AuditService.Entry(Context(c), claims.OrganizationID, claims.Subject, "finding.due_date", "finding:"+c.Params("id"), c.IP(), "", "success",
+			map[string]any{"due_date": *req.DueDate})
+	}
+	if req.Status == "" {
+		f, _ := a.svc.Findings.ByID(Context(c), claims.OrganizationID, c.Params("id"))
+		return c.JSON(f)
 	}
 	status := domain.FindingStatus(req.Status)
 	valid := map[domain.FindingStatus]bool{
@@ -233,6 +276,32 @@ func (a *App) handleBulkFindings(c *fiber.Ctx) error {
 	}
 	a.svc.AuditService.Entry(Context(c), claims.OrganizationID, claims.Subject, "finding.bulk_status", "findings:"+itoa(len(req.IDs)), c.IP(), "", "success",
 		map[string]any{"to": string(status), "updated": n})
+	return c.JSON(fiber.Map{"updated": n})
+}
+
+// handleBulkAssignFindings POST /findings/bulk-assign - one owner on many
+// findings in a single audited statement (F2 "bulk assign").
+func (a *App) handleBulkAssignFindings(c *fiber.Ctx) error {
+	claims := a.claimsFrom(c)
+	if he := a.requirePerm(c, domain.PermFindingWrite); he != nil {
+		return he
+	}
+	var req struct {
+		IDs   []string `json:"ids"`
+		Owner string   `json:"owner"`
+	}
+	if err := c.BodyParser(&req); err != nil || len(req.IDs) == 0 {
+		return BadRequest("ids are required")
+	}
+	if len(req.IDs) > 500 {
+		return BadRequest("bulk limit is 500 findings per request")
+	}
+	n, err := a.svc.Findings.BulkAssign(Context(c), claims.OrganizationID, req.IDs, req.Owner)
+	if err != nil {
+		return Internal("bulk assign failed")
+	}
+	a.svc.AuditService.Entry(Context(c), claims.OrganizationID, claims.Subject, "finding.bulk_assign", "findings:"+itoa(len(req.IDs)), c.IP(), "", "success",
+		map[string]any{"owner": req.Owner, "updated": n})
 	return c.JSON(fiber.Map{"updated": n})
 }
 

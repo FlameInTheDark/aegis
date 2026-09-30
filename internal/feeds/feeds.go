@@ -191,6 +191,12 @@ type Runner struct {
 	// emission into the alert outbox (events fan out per organization,
 	// because feeds are deployment-global); nil disables emission.
 	DB *pg.DB
+	// Owner identifies this replica in the cross-replica sync lease
+	// (defaults to hostname:pid). LeaseTTL bounds how long a lease outlives
+	// a crashed worker (defaults to 2h — the NVD bootstrap runs tens of
+	// minutes, so 2h is generous without delaying crash recovery).
+	Owner    string
+	LeaseTTL time.Duration
 
 	mu      sync.Mutex
 	running map[string]bool // per-feed single-flight guard
@@ -215,6 +221,22 @@ func (r *Runner) release(name string) {
 	if r.running != nil {
 		delete(r.running, name)
 	}
+}
+
+func (r *Runner) leaseIdentity() (string, time.Duration) {
+	owner := r.Owner
+	if owner == "" {
+		host, err := os.Hostname()
+		if err != nil || host == "" {
+			host = "feed-worker"
+		}
+		owner = fmt.Sprintf("%s:%d", host, os.Getpid())
+	}
+	ttl := r.LeaseTTL
+	if ttl <= 0 {
+		ttl = 2 * time.Hour
+	}
+	return owner, ttl
 }
 
 // RunAll executes every job concurrently. Sequential execution used to
@@ -265,6 +287,26 @@ func (r *Runner) RunFeed(ctx context.Context, name string, full bool) error {
 
 // RunOne runs one feed job with full bookkeeping.
 func (r *Runner) RunOne(ctx context.Context, job FeedJob, full bool) (err error) {
+	// Cross-replica claim: the in-process tryClaim guard of RunAll/RunFeed
+	// does not protect against a second feed-worker replica pointed at the
+	// same database. Lease acquisition failure is fail-open on DB errors
+	// (the sync itself will fail anyway) but fail-closed on a held lease.
+	owner, ttl := r.leaseIdentity()
+	acquired, lerr := r.Repo.AcquireLease(ctx, job.Name(), owner, ttl)
+	if lerr != nil {
+		r.Log.Warn("feed lease check failed; running without cross-replica lease", "feed", job.Name(), "err", lerr)
+	} else if !acquired {
+		r.Log.Info("feed sync lease held by another replica, skipping", "feed", job.Name())
+		return nil
+	} else {
+		defer func() {
+			// Release with a fresh context: the run context may already be
+			// cancelled when the defer chain unwinds.
+			if rerr := r.Repo.ReleaseLease(context.Background(), job.Name(), owner); rerr != nil {
+				r.Log.Warn("feed lease release failed", "feed", job.Name(), "err", rerr)
+			}
+		}()
+	}
 	started := time.Now().UTC()
 	runID, runErr := r.Repo.StartRun(ctx, job.Name())
 	if runErr != nil {

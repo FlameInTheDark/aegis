@@ -1,0 +1,41 @@
+{
+  "catalog_version": "2026.09",
+  "note": "Static map from platform-observable weakness classes to a small cited control catalog. Reviewed like a feed: changes land as data changes. This mapping is evidence support only - it never asserts compliance or certification.",
+  "controls": [
+    {
+      "id": "CIS-7",
+      "source": "CIS Controls v8",
+      "name": "Continuous Vulnerability Management",
+      "description": "Establish a program to continuously assess and remediate software vulnerabilities. Mapped evidence: open critical and high severity findings.",
+      "match": { "severity_any": ["critical", "high"] }
+    },
+    {
+      "id": "NIST-CSF-PR.PS-2",
+      "source": "NIST CSF 2.0",
+      "name": "Software is maintained and known exploited vulnerabilities are remediated",
+      "description": "Mapped evidence: open findings whose CVE is in the CISA Known Exploited Vulnerabilities catalog.",
+      "match": { "kev": true }
+    },
+    {
+      "id": "CIS-4.6",
+      "source": "CIS Controls v8",
+      "name": "Securely manage enterprise assets and software",
+      "description": "Management interfaces and administrative services are not exposed. Mapped evidence: findings about exposed management ports or admin services.",
+      "match": { "title_any": ["management port", "admin service", "management interface", "exposed management"] }
+    },
+    {
+      "id": "CIS-3.11",
+      "source": "CIS Controls v8",
+      "name": "Encrypt sensitive data at rest",
+      "description": "Disk encryption posture is verified, not inferred. Mapped evidence: findings about missing or partial disk encryption.",
+      "match": { "title_any": ["disk encryption"] }
+    },
+    {
+      "id": "NIST-CSF-DE.CM-1",
+      "source": "NIST CSF 2.0",
+      "name": "Networks and devices are monitored",
+      "description": "Endpoint sensors report continuously. Mapped evidence: findings about missing or stale agents that blind the platform.",
+      "match": { "title_any": ["agent missing", "stale agent", "agent not seen"] }
+    }
+  ]
+}

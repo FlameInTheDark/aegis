@@ -36,6 +36,13 @@ export function DestinationManager() {
   const [editTarget, setEditTarget] = React.useState<AlertDestination | null>(null);
   const [name, setName] = React.useState("");
   const [url, setUrl] = React.useState("");
+  // F5: email destination fields (SMTP password rides the secret field).
+  const [kind, setKind] = React.useState<"webhook" | "email">("webhook");
+  const [smtpHost, setSmtpHost] = React.useState("");
+  const [smtpPort, setSmtpPort] = React.useState("587");
+  const [smtpFrom, setSmtpFrom] = React.useState("");
+  const [smtpTo, setSmtpTo] = React.useState("");
+  const [smtpPassword, setSmtpPassword] = React.useState("");
   const [minSeverity, setMinSeverity] = React.useState("low");
   const [deleteTarget, setDeleteTarget] = React.useState<AlertDestination | null>(null);
   const [formError, setFormError] = React.useState<string | null>(null);
@@ -61,7 +68,26 @@ export function DestinationManager() {
     setFormError(null);
     try {
       if (editTarget) {
-        await update.mutateAsync({ id: editTarget.id, payload: { name, url, min_severity: minSeverity } });
+        const payload: Record<string, unknown> = { name, url, min_severity: minSeverity };
+        if (editTarget.kind === "email") {
+          payload.config = {
+            smtp_host: smtpHost, smtp_port: Number(smtpPort) || 587,
+            from: smtpFrom, to: smtpTo.split(",").map((x) => x.trim()).filter(Boolean),
+          };
+          if (smtpPassword) payload.secret = smtpPassword;
+          payload.url = "";
+        }
+        await update.mutateAsync({ id: editTarget.id, payload });
+      } else if (kind === "email") {
+        await create.mutateAsync({
+          name, url: "", kind: "email", min_severity: minSeverity,
+          events: ["fired", "recovered", "repeat"], enabled: true,
+          config: {
+            smtp_host: smtpHost, smtp_port: Number(smtpPort) || 587,
+            from: smtpFrom, to: smtpTo.split(",").map((x) => x.trim()).filter(Boolean),
+          },
+          secret: smtpPassword,
+        });
       } else {
         await create.mutateAsync({ name, url, kind: "webhook", min_severity: minSeverity, events: ["fired", "recovered", "repeat"], enabled: true });
       }
@@ -138,7 +164,7 @@ export function DestinationManager() {
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-0.5">
-                        <Button variant="ghost" size="icon-xs" title="Send test delivery" aria-label={`Test ${d.name}`} onClick={() => test.mutate(d.id)} disabled={d.kind !== "webhook"}>
+                        <Button variant="ghost" size="icon-xs" title="Send test delivery" aria-label={`Test ${d.name}`} onClick={() => test.mutate(d.id)} disabled={d.kind === "in_app"}>
                           <Play />
                         </Button>
                         {dead > 0 && (
@@ -170,7 +196,7 @@ export function DestinationManager() {
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle className="text-sm">{editTarget ? "Edit webhook destination" : "New webhook destination"}</DialogTitle>
+            <DialogTitle className="text-sm">{editTarget ? `Edit ${editTarget.kind === "email" ? "email" : "webhook"} destination` : kind === "email" ? "New email destination" : "New webhook destination"}</DialogTitle>
           </DialogHeader>
           <div className="grid gap-3">
             {formError && <Alert variant="destructive" className="py-2"><AlertDescription className="text-xs">{formError}</AlertDescription></Alert>}
@@ -178,6 +204,47 @@ export function DestinationManager() {
               <Label htmlFor="d-name">Name</Label>
               <Input id="d-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. SOC chatops relay" />
             </div>
+            {!editTarget && (
+              <div className="grid gap-1.5">
+                <Label>Destination type</Label>
+                <Select value={kind} onValueChange={(v) => setKind(v as "webhook" | "email")}>
+                  <SelectTrigger aria-label="Destination type"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="webhook">Webhook (HTTPS POST)</SelectItem>
+                    <SelectItem value="email">Email (SMTP submission)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            {kind === "email" && (
+              <>
+                <div className="grid grid-cols-[1fr_96px] gap-2">
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="d-smtp-host">SMTP host</Label>
+                    <Input id="d-smtp-host" value={smtpHost} onChange={(e) => setSmtpHost(e.target.value)} placeholder="smtp.example.com" />
+                  </div>
+                  <div className="grid gap-1.5">
+                    <Label htmlFor="d-smtp-port">Port</Label>
+                    <Input id="d-smtp-port" value={smtpPort} onChange={(e) => setSmtpPort(e.target.value)} placeholder="587" inputMode="numeric" />
+                  </div>
+                </div>
+                <p className="text-[11px] text-muted-foreground">Port 465 uses implicit TLS; other ports use STARTTLS when the server offers it.</p>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="d-smtp-from">From address</Label>
+                  <Input id="d-smtp-from" value={smtpFrom} onChange={(e) => setSmtpFrom(e.target.value)} placeholder="aegis@example.com" />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="d-smtp-to">Recipients (comma separated)</Label>
+                  <Input id="d-smtp-to" value={smtpTo} onChange={(e) => setSmtpTo(e.target.value)} placeholder="oncall@example.com, sre@example.com" />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="d-smtp-pass">SMTP password</Label>
+                  <Input id="d-smtp-pass" type="password" value={smtpPassword} onChange={(e) => setSmtpPassword(e.target.value)} placeholder="submission credential" />
+                  <p className="text-[11px] text-muted-foreground">Stored server-side, returned only masked; rotation happens through edit.</p>
+                </div>
+              </>
+            )}
+            {kind === "webhook" && (
             <div className="grid gap-1.5">
               <Label htmlFor="d-url">HTTPS endpoint</Label>
               <Input id="d-url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://hooks.example.com/aegis" />
@@ -185,6 +252,7 @@ export function DestinationManager() {
                 HTTPS only in production; private/loopback targets are rejected. Redirects are never followed.
               </p>
             </div>
+            )}
             <div className="grid gap-1.5">
               <Label>Minimum severity</Label>
               <Select value={minSeverity} onValueChange={setMinSeverity}>

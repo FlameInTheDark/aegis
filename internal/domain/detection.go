@@ -36,6 +36,9 @@ type Event struct {
 	PayloadMeta   map[string]any `json:"payload_metadata,omitempty"`
 	RawReference  string         `json:"raw_reference,omitempty"` // object storage key
 	Tags          []string       `json:"tags,omitempty"`
+	// Synthetic marks console test-ingest / demo rows (F11). Displayed as
+	// a badge; never counted by reports as real telemetry.
+	Synthetic bool `json:"synthetic,omitempty"`
 }
 
 // SchemaVersion is the current event envelope version.

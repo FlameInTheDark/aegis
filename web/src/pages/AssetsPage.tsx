@@ -62,6 +62,7 @@ import {
   TableFooterBar,
   usePagination,
 } from "@/components/shared";
+import { SavedViewsBar } from "@/components/saved-views/SavedViewsBar";
 
 type SortKey = "asset" | "type" | "os" | "exposure" | "criticality" | "risk" | "lastSeen";
 
@@ -485,6 +486,7 @@ export function AssetsPage() {
         description="Every host and device observed by scanners, sensors and agents. Confidence reflects fingerprint evidence strength, not certainty."
         actions={
           <>
+            <SavedViewsBar page="assets" />
             <Button
               variant="outline"
               size="sm"

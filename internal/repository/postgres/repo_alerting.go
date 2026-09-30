@@ -436,13 +436,13 @@ type DestinationRepo struct{ db *DB }
 func NewDestinationRepo(db *DB) *DestinationRepo { return &DestinationRepo{db: db} }
 
 const destinationColumns = `id, organization_id, kind, name, url, secret, events, min_severity,
-        enabled, created_by, created_at, updated_at, last_success_at, last_error`
+        enabled, created_by, created_at, updated_at, last_success_at, last_error, COALESCE(config,'{}'::jsonb) AS config`
 
 func scanDestination(row pgx.Row) (*domain.Destination, error) {
 	var d domain.Destination
 	err := row.Scan(&d.ID, &d.OrgID, &d.Kind, &d.Name, &d.URL, &d.Secret, &d.Events,
 		&d.MinSeverity, &d.Enabled, &d.CreatedBy, &d.CreatedAt, &d.UpdatedAt,
-		&d.LastSuccessAt, &d.LastError)
+		&d.LastSuccessAt, &d.LastError, &d.Config)
 	if err != nil {
 		return nil, err
 	}
@@ -466,9 +466,9 @@ func (r *DestinationRepo) Create(ctx context.Context, d *domain.Destination) err
 	}
 	q := r.db.Insert("alert_destinations").Columns(
 		"id", "organization_id", "kind", "name", "url", "secret", "events", "min_severity",
-		"enabled", "created_by",
+		"enabled", "created_by", "config",
 	).Values(d.ID, d.OrgID, d.Kind, d.Name, d.URL, d.Secret, nonNil(d.Events), d.MinSeverity,
-		d.Enabled, d.CreatedBy)
+		d.Enabled, d.CreatedBy, nullJSON(d.Config))
 	sql, args, err := q.ToSql()
 	if err != nil {
 		return fmt.Errorf("postgres: build destination insert: %w", err)
@@ -482,6 +482,7 @@ func (r *DestinationRepo) Update(ctx context.Context, d *domain.Destination) err
 	sets := map[string]any{
 		"name": d.Name, "url": d.URL, "events": nonNil(d.Events),
 		"min_severity": d.MinSeverity, "enabled": d.Enabled, "updated_at": time.Now().UTC(),
+		"config": nullJSON(d.Config),
 	}
 	if d.Secret != "" {
 		sets["secret"] = d.Secret // rotation; empty means keep current
@@ -1187,8 +1188,8 @@ func (r *OutboxRepo) ListRecent(ctx context.Context, orgID string, types []strin
 		limit = 50
 	}
 	q := r.db.Select(`id, organization_id, type, schema_version, subject_type, subject_id,
-		site_id, asset_id, entity_type, entity_id, occurred_at, recorded_at,
-		payload, correlation_id, causation_id, dedup_key, published_at, attempts, next_attempt_at, last_error`).
+                site_id, asset_id, entity_type, entity_id, occurred_at, recorded_at,
+                payload, correlation_id, causation_id, dedup_key, published_at, attempts, next_attempt_at, last_error`).
 		From("event_outbox").Where(squirrel.Eq{"organization_id": orgID})
 	if len(types) > 0 {
 		q = q.Where(squirrel.Expr("type = ANY($1)", pqTextArray(types)))

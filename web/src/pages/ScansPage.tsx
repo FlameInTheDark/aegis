@@ -5,7 +5,7 @@ import { cn, timeAgo, formatDateTime } from "@/lib/utils";
 import { useRouter } from "@/lib/router";
 import type { Scan, ScanEngine, ScanState } from "@/data/types";
 import { useScope } from "@/components/layout/AppShell";
-import { useCancelScan, useCreateScan, useScans, useScan, useSites, type CreateScanInput } from "@/lib/queries";
+import { useCancelScan, useCreateScan, useCreateSchedule, useScans, useScan, useSites, type CreateScanInput } from "@/lib/queries";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -45,6 +45,7 @@ export function ScansPage() {
   const { site } = useScope();
   const sites = useSites();
   const createScanM = useCreateScan();
+  const createScheduleM = useCreateSchedule();
   const cancelScanM = useCancelScan();
   const scansQ = useScans({ site, limit: 200 });
   const [q, setQ] = React.useState("");
@@ -94,7 +95,26 @@ export function ScansPage() {
           variant: res.scan.state === "queued" ? "warning" : "success",
         });
         if (res.scan) setDetailId(res.scan.id);
-        void opts;
+        // The dialog's schedule is not discarded (was `void opts`): the
+        // schedule re-runs this profile on the chosen cron at the same site.
+        if (opts.scheduleCron) {
+          createScheduleM.mutate(
+            {
+              site_id: input.site_id,
+              name: `${input.name || input.profile} — schedule`,
+              profile: input.profile,
+              cron: opts.scheduleCron,
+              scope: input.targets,
+              engine: input.engine,
+            },
+            {
+              onSuccess: () =>
+                toast({ title: "Schedule created", description: `Re-runs on: ${opts.scheduleCron}`, variant: "success" }),
+              onError: (e) =>
+                toast({ title: "Schedule not created", description: (e as Error).message, variant: "error" }),
+            },
+          );
+        }
       },
       onError: (e) => toast({ title: "Scan rejected", description: (e as Error).message, variant: "error" }),
     });

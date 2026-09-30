@@ -11,6 +11,23 @@
 
 Conditions are typed field/operator/value matchers (`eq neq in gt gte lt lte contains regex exists`) over the normalized event envelope — including `payload_metadata` paths.
 
+## Authoring and validation
+
+`POST /detections/rules` does not store whatever it receives:
+`detections.ValidateRule` mirrors the alert engine's condition allowlist —
+known rule type, bounded window and threshold, known fields/operators,
+bounded regex length, compilable pattern, nested-quantifier rejection. A
+rule the engine could not safely evaluate is rejected with a 400 instead
+of being persisted. `Ingest` still skips unknown rule types defensively,
+but now increments `detection_rules_skipped_total` rather than doing it
+silently, and listing/reading rules requires `detection:read`.
+
+The console's Detections page has a **Rules** tab (list, enable/disable,
+create form limited to the four implemented types and the validated DSL);
+built-in seeded rules are editable only in their `enabled` flag so a seed
+rerun cannot fight an operator's intent. Reading the match list goes
+through server-side filters and pagination.
+
 ## Deduplication
 
 One match per `(rule, entity, window)` via Redis `SETNX` windows: 100 identical alerts in 30 seconds become **one incident with count=100**, not 100 notifications.

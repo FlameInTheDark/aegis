@@ -100,6 +100,11 @@ func run() error {
 		allJobs = append(allJobs, &feeds.OvalJob{Client: client, Advisories: advisoriesRepo, Log: log,
 			Sources: sources, LastSyncFn: lastSyncOf("advisories")})
 	}
+	// F14: per-PURL OSV queries for language-ecosystem packages. Bounded
+	// per run and resumable; status lands on each software row. The
+	// feed HTTP client carries the shared user agent; OSV needs no key.
+	allJobs = append(allJobs, &feeds.OSVJob{Vulns: vulns,
+		Software: pg.NewSoftwareRepo(db), Log: log})
 	// AEGIS_FEEDS_ENABLED is the documented kill switch for the heavy
 	// bootstrap downloads (demo / air-gapped deployments). Unknown names are
 	// ignored so the list may mention sources that don't exist yet.

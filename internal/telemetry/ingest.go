@@ -43,6 +43,9 @@ type SubjectEvent struct {
 	SensorID string          `json:"sensor_id,omitempty"`
 	Source   string          `json:"source"` // suricata|zeek|snort|agent
 	Raw      json.RawMessage `json:"raw"`
+	// Synthetic marks console test-ingest rows so they never masquerade as
+	// real sensor telemetry in the Events page.
+	Synthetic bool `json:"synthetic,omitempty"`
 }
 
 // Run starts the durable consumer (blocks until ctx is cancelled).
@@ -90,6 +93,9 @@ func (in *Ingestor) Normalize(se SubjectEvent) ([]domain.Event, error) {
 			continue // partial failure: keep going
 		}
 		out = append(out, *ev)
+		if se.Synthetic {
+			out[len(out)-1].Synthetic = true
+		}
 		if in.BatchSize > 0 && len(out) >= in.BatchSize {
 			break
 		}

@@ -225,17 +225,28 @@ func Load(service string) (*Config, error) {
 	}
 
 	c.Feeds.Enabled = getSlice("AEGIS_FEEDS_ENABLED",
-		[]string{"nvd", "kev", "epss", "cvelistv5"})
+		[]string{"nvd", "kev", "epss", "cvelistv5", "advisories", "osv"})
 	c.Feeds.Interval = getDur("AEGIS_FEEDS_INTERVAL", 6*time.Hour)
 	c.Feeds.CVEListURL = get("AEGIS_FEED_CVELIST_URL", "")
 	// Optional but strongly recommended in production: raises NVD from 5
 	// requests/30s to 50 and makes the first full sync minutes instead of
 	// ~half an hour. Request one at https://data.nist.gov (NVD API key).
 	c.Feeds.NVDAPIKey = get("AEGIS_NVD_API_KEY", "")
-	// Distro OVAL snapshots. Off by default —
-	// full snapshots are large; opt in per distro release:
+	// Distro OVAL snapshots. On by default for the distro families the
+	// advisory matcher already understands, using the verified upstream
+	// snapshots in DefaultOvalSources. Override the list wholesale:
 	//   AEGIS_FEED_OVAL_SOURCES=ubuntu:22.04:https://...bz2:bz2,debian:12:https://...
-	c.Feeds.OvalSources = parseOvalSources(get("AEGIS_FEED_OVAL_SOURCES", ""))
+	// or disable entirely (air-gapped installs, bandwidth budgets):
+	//   AEGIS_FEED_OVAL_SOURCES=off
+	if raw, ok := os.LookupEnv("AEGIS_FEED_OVAL_SOURCES"); ok {
+		if strings.EqualFold(strings.TrimSpace(raw), "off") {
+			c.Feeds.OvalSources = nil
+		} else {
+			c.Feeds.OvalSources = parseOvalSources(raw)
+		}
+	} else {
+		c.Feeds.OvalSources = DefaultOvalSources()
+	}
 
 	c.OTel.Endpoint = get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
 	c.OTel.SampleRatio = getFloat("AEGIS_TRACES_SAMPLE_RATIO", 0.05)
@@ -390,6 +401,31 @@ func parseOvalSources(raw string) []OvalSource {
 		out = append(out, src)
 	}
 	return out
+}
+
+// DefaultOvalSources returns the OVAL feeds enabled out of the box for the
+// distro families the advisory matcher already understands (Debian, Ubuntu,
+// RHEL and its AlmaLinux rebuild). Every URL below is the upstream snapshot
+// the OVAL parser consumes directly and was verified to resolve; a
+// deployment can replace the list wholesale via AEGIS_FEED_OVAL_SOURCES or
+// turn it off with AEGIS_FEED_OVAL_SOURCES=off.
+//
+// Alpine is deliberately absent: there is no stable upstream OVAL snapshot
+// for Alpine releases yet (its security data ships as secdb JSON), so no
+// default URL is invented — configure one via AEGIS_FEED_OVAL_SOURCES when
+// a source exists. Rocky/CentOS/Amazon follow the same rule until their
+// feeds have verified, stable URLs.
+func DefaultOvalSources() []OvalSource {
+	return []OvalSource{
+		{Family: "debian", Release: "12", URL: "https://www.debian.org/security/oval/oval-definitions-bookworm.xml.bz2", Compress: "bz2"},
+		{Family: "debian", Release: "13", URL: "https://www.debian.org/security/oval/oval-definitions-trixie.xml.bz2", Compress: "bz2"},
+		{Family: "ubuntu", Release: "22.04", URL: "https://security-metadata.canonical.com/oval/com.ubuntu.jammy.cve.oval.xml.bz2", Compress: "bz2"},
+		{Family: "ubuntu", Release: "24.04", URL: "https://security-metadata.canonical.com/oval/com.ubuntu.noble.cve.oval.xml.bz2", Compress: "bz2"},
+		{Family: "rhel", Release: "8", URL: "https://www.redhat.com/security/data/oval/v2/RHEL8/rhel-8-including-unpatched.oval.xml.bz2", Compress: "bz2"},
+		{Family: "rhel", Release: "9", URL: "https://www.redhat.com/security/data/oval/v2/RHEL9/rhel-9-including-unpatched.oval.xml.bz2", Compress: "bz2"},
+		{Family: "alma", Release: "8", URL: "https://security.almalinux.org/oval/org.almalinux.alsa-8.xml.bz2", Compress: "bz2"},
+		{Family: "alma", Release: "9", URL: "https://security.almalinux.org/oval/org.almalinux.alsa-9.xml.bz2", Compress: "bz2"},
+	}
 }
 
 // SSHHost is one agent-less SSH collection target.

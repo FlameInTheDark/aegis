@@ -5,14 +5,19 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/smtp"
 	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/FlameInTheDark/aegis/internal/domain"
@@ -28,7 +33,7 @@ const (
 	maxDeliveryAttempts = 5
 )
 
-// DeliveryWorker claims due deliveries and performs webhook sends. The
+// DeliveryWorker claims due deliveries and performs webhook/email sends. The
 // in-app alert IS the occurrence (persisted before any delivery); in-app
 // destinations are recorded for history/health and complete immediately.
 type DeliveryWorker struct {
@@ -40,6 +45,9 @@ type DeliveryWorker struct {
 	AllowInsecure bool
 	Interval      time.Duration
 	Now           func() time.Time
+	// ConsoleURL is the browser-facing base URL used in email bodies so
+	// an on-call engineer can jump from the message into the console.
+	ConsoleURL string
 }
 
 // Run blocks until ctx is done.
@@ -64,15 +72,15 @@ func (w *DeliveryWorker) RunOnce(ctx context.Context) int {
 	// Claim atomically: status moves to retry and attempts increment in the
 	// claiming statement, so two workers can never take the same row.
 	sql := `UPDATE alert_deliveries SET status = 'retry', attempts = attempts + 1
-		WHERE id IN (
-			SELECT id FROM alert_deliveries
-			WHERE status IN ('pending','retry') AND next_attempt_at <= $1
-			ORDER BY next_attempt_at
-			LIMIT 10
-			FOR UPDATE SKIP LOCKED
-		)
-		RETURNING id, organization_id, occurrence_id, destination_id, kind, status, attempts, next_attempt_at,
-			last_status_code, last_error, idempotency_key, payload, created_at`
+                WHERE id IN (
+                        SELECT id FROM alert_deliveries
+                        WHERE status IN ('pending','retry') AND next_attempt_at <= $1
+                        ORDER BY next_attempt_at
+                        LIMIT 10
+                        FOR UPDATE SKIP LOCKED
+                )
+                RETURNING id, organization_id, occurrence_id, destination_id, kind, status, attempts, next_attempt_at,
+                        last_status_code, last_error, idempotency_key, payload, created_at`
 	rows, err := w.DB.Pool.Query(ctx, sql, w.now())
 	if err != nil {
 		w.Log.Warn("delivery claim failed", "err", err)
@@ -112,8 +120,137 @@ func (w *DeliveryWorker) process(ctx context.Context, d *domain.Delivery) {
 		w.finish(ctx, d, true, 0, "")
 		return
 	}
+	if dest.Kind == domain.DestinationEmail {
+		status, err := w.sendEmail(dest, d)
+		w.finish(ctx, d, err == nil, status, errString(err))
+		return
+	}
 	status, err := w.sendWebhook(ctx, dest, d)
 	w.finish(ctx, d, err == nil, status, errString(err))
+}
+
+// sendEmail performs one SMTP submission (F5). Same lifecycle as webhooks:
+// attempts, backoff, dead-letter and replay ride the existing delivery row.
+// The body is plain text assembled from fixed fields — event payloads are
+// never inlined as HTML. Port 465 uses implicit TLS; anything else uses
+// STARTTLS when the server offers it and falls back to plaintext only when
+// it does not (submission relays on 587 offer it).
+func (w *DeliveryWorker) sendEmail(dest *domain.Destination, d *domain.Delivery) (int, error) {
+	cfg, err := domain.ParseEmailConfig(dest.Config)
+	if err != nil {
+		return 0, err
+	}
+	if dest.Secret == "" {
+		return 0, errors.New("smtp password not configured")
+	}
+	var p struct {
+		Trigger struct {
+			Name     string `json:"name"`
+			Severity string `json:"severity"`
+		} `json:"trigger"`
+		Occurrence struct {
+			ID              string `json:"id"`
+			State           string `json:"state"`
+			Severity        string `json:"severity"`
+			Title           string `json:"title"`
+			Summary         string `json:"summary"`
+			EntityType      string `json:"entity_type"`
+			EntityID        string `json:"entity_id"`
+			OccurrenceCount int    `json:"occurrence_count"`
+		} `json:"occurrence"`
+	}
+	if err := json.Unmarshal(d.Payload, &p); err != nil {
+		return 0, fmt.Errorf("delivery payload: %w", err)
+	}
+	subject := fmt.Sprintf("[Aegis][%s] %s",
+		strings.ToUpper(p.Occurrence.Severity), p.Occurrence.Title)
+	var b strings.Builder
+	fmt.Fprintf(&b, "Trigger: %s (%s)\n", p.Trigger.Name, p.Trigger.Severity)
+	fmt.Fprintf(&b, "Severity: %s\n", p.Occurrence.Severity)
+	fmt.Fprintf(&b, "State: %s", p.Occurrence.State)
+	if p.Occurrence.OccurrenceCount > 1 {
+		fmt.Fprintf(&b, " (x%d)", p.Occurrence.OccurrenceCount)
+	}
+	b.WriteString("\n")
+	if p.Occurrence.EntityType != "" {
+		fmt.Fprintf(&b, "Entity: %s %s\n", p.Occurrence.EntityType, p.Occurrence.EntityID)
+	}
+	if p.Occurrence.Summary != "" {
+		fmt.Fprintf(&b, "\n%s\n", p.Occurrence.Summary)
+	}
+	if w.ConsoleURL != "" {
+		fmt.Fprintf(&b, "\nOpen: %s/#/alerts\n", strings.TrimSuffix(w.ConsoleURL, "/"))
+	}
+	fmt.Fprintf(&b, "\nDelivery: %s\n", d.IdempotencyKey)
+	msg := buildMailMessage(cfg.From, cfg.To, subject, b.String())
+
+	addr := net.JoinHostPort(cfg.SMTPHost, strconv.Itoa(cfg.SMTPPort))
+	conn, err := net.DialTimeout("tcp", addr, deliveryTimeout)
+	if err != nil {
+		return 0, fmt.Errorf("smtp dial: %w", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(deliveryTimeout))
+	if cfg.SMTPPort == 465 {
+		conn = tls.Client(conn, &tls.Config{ServerName: cfg.SMTPHost, MinVersion: tls.VersionTLS12})
+	}
+	cl, err := smtp.NewClient(conn, cfg.SMTPHost)
+	if err != nil {
+		return 0, fmt.Errorf("smtp handshake: %w", err)
+	}
+	defer cl.Close()
+	if cfg.SMTPPort != 465 {
+		if ok, _ := cl.Extension("STARTTLS"); ok {
+			if err := cl.StartTLS(&tls.Config{ServerName: cfg.SMTPHost, MinVersion: tls.VersionTLS12}); err != nil {
+				return 0, fmt.Errorf("smtp starttls: %w", err)
+			}
+		}
+	}
+	if ok, params := cl.Extension("AUTH"); ok {
+		if err := cl.Auth(smtp.PlainAuth("", cfg.From, dest.Secret, cfg.SMTPHost)); err != nil {
+			return 0, fmt.Errorf("smtp auth: %w (params %q)", err, params)
+		}
+	}
+	if err := cl.Mail(cfg.From); err != nil {
+		return 0, fmt.Errorf("smtp mail: %w", err)
+	}
+	for _, rcpt := range cfg.To {
+		if err := cl.Rcpt(strings.TrimSpace(rcpt)); err != nil {
+			return 0, fmt.Errorf("smtp rcpt: %w", err)
+		}
+	}
+	data, err := cl.Data()
+	if err != nil {
+		return 0, fmt.Errorf("smtp data: %w", err)
+	}
+	if _, err := data.Write(msg); err != nil {
+		_ = data.Close()
+		return 0, fmt.Errorf("smtp write: %w", err)
+	}
+	if err := data.Close(); err != nil {
+		return 0, fmt.Errorf("smtp submit: %w", err)
+	}
+	if err := cl.Quit(); err != nil {
+		return 0, fmt.Errorf("smtp quit: %w", err)
+	}
+	return 250, nil
+}
+
+// buildMailMessage assembles a plain-text RFC 5322 message with fixed
+// headers; the subject is sanitized so injected newlines cannot smuggle
+// extra headers.
+func buildMailMessage(from string, to []string, subject, body string) []byte {
+	subject = strings.ReplaceAll(subject, "\r", " ")
+	subject = strings.ReplaceAll(subject, "\n", " ")
+	var b strings.Builder
+	fmt.Fprintf(&b, "From: %s\r\n", from)
+	fmt.Fprintf(&b, "To: %s\r\n", strings.Join(to, ", "))
+	fmt.Fprintf(&b, "Subject: %s\r\n", subject)
+	fmt.Fprintf(&b, "MIME-Version: 1.0\r\n")
+	fmt.Fprintf(&b, "Content-Type: text/plain; charset=utf-8\r\n")
+	fmt.Fprintf(&b, "\r\n")
+	b.WriteString(body)
+	return []byte(b.String())
 }
 
 // sendWebhook performs one signed delivery.
@@ -193,7 +330,7 @@ func (w *DeliveryWorker) finish(ctx context.Context, d *domain.Delivery, ok bool
 // ReplayDead requeues every dead delivery for one destination.
 func ReplayDead(ctx context.Context, db *pg.DB, orgID, destinationID string) (int64, error) {
 	tag, err := db.Pool.Exec(ctx, `UPDATE alert_deliveries SET status = 'pending', attempts = 0, next_attempt_at = now()
-		WHERE organization_id = $1 AND destination_id = $2 AND status = 'dead'`, orgID, destinationID)
+                WHERE organization_id = $1 AND destination_id = $2 AND status = 'dead'`, orgID, destinationID)
 	if err != nil {
 		return 0, err
 	}

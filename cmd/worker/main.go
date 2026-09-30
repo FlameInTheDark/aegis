@@ -164,7 +164,7 @@ func run() error {
 	detectEngine := &detections.Engine{
 		Rules: pg.NewRuleRepo(db), Matches: pg.NewMatchRepo(db), Baselines: pg.NewBaselineRepo(db),
 		Cache: rdb, Log: log,
-		Outbox: pg.NewOutboxRepo(db),
+		Outbox: pg.NewOutboxRepo(db), Metrics: metrics,
 	}
 	ingestor := &telemetry.Ingestor{Bus: bus, CH: chDB, Engine: detectEngine, Cache: rdb, Log: log, BatchSize: 500}
 	if chDB != nil {
@@ -184,6 +184,7 @@ func run() error {
 	reportsSvc := &reports.Service{
 		Reports: pg.NewReportRepo(db), Findings: pg.NewFindingRepo(db), Assets: pg.NewAssetRepo(db), Details: pg.NewReportDetailRepo(db),
 		Sites: pg.NewSiteRepo(db), Orgs: pg.NewOrgRepo(db), Services: pg.NewServiceRepo(db), Scans: pg.NewScanRepo(db), Store: store, Log: log,
+		Vulns: pg.NewVulnRepo(db),
 	}
 	agentTasks := pg.NewAgentTaskRepo(db)
 	agentsRepo := pg.NewAgentRepo(db)
@@ -236,6 +237,7 @@ func run() error {
 		DB: db, Log: log,
 		AllowInsecure: getEnvBool("AEGIS_ALERT_WEBHOOK_ALLOW_INSECURE"),
 		Interval:      5 * time.Second,
+		ConsoleURL:    cfg.PublicURL,
 	}
 	go delivery.Run(ctx)
 

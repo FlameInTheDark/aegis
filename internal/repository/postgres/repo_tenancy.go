@@ -323,6 +323,17 @@ WHERE id = $1`
 
 // Rotate retires the presented token (and the row's current token — the
 // union covers the concurrent-rotation interleave) and stores newHash.
+// SetOrganization moves the session family to another membership (F3).
+// The refresh cookie stays valid: switching tenant is NOT a re-login, it
+// re-mints the access token against the new organization on the spot.
+func (r *SessionRepo) SetOrganization(ctx context.Context, id, orgID string) error {
+	q := r.db.Update("sessions").
+		Set("organization_id", orgID).
+		Where(squirrel.Eq{"id": id})
+	_, err := r.db.Exec(ctx, q)
+	return err
+}
+
 func (r *SessionRepo) Rotate(ctx context.Context, id, presentedHash, newHash string) error {
 	cmd, err := r.db.ExecSQL(ctx, rotateSQL, id, presentedHash, newHash)
 	if err != nil {

@@ -138,8 +138,14 @@ type MatchFilter struct {
 	RuleID string
 	Level  string
 	Status string
-	Limit  int
-	Page   int
+	// Search is a free-text filter matched against rule title, summary,
+	// entity and source IP so the console can page server-side instead of
+	// holding up to 200 rows in the browser (plan Phase 1.2).
+	Search string
+	// Assignee restricts the queue to one analyst ("my queue", F2).
+	Assignee string
+	Limit    int
+	Page     int
 }
 
 // SetStatus moves a match through the triage workflow; returns
@@ -165,16 +171,29 @@ func (r *MatchRepo) List(ctx context.Context, f MatchFilter) ([]domain.Detection
 	if f.Page < 1 {
 		f.Page = 1
 	}
-	where := squirrel.Eq{"organization_id": f.OrgID}
+	conds := squirrel.And{squirrel.Eq{"organization_id": f.OrgID}}
 	if f.RuleID != "" {
-		where["rule_id"] = f.RuleID
+		conds = append(conds, squirrel.Eq{"rule_id": f.RuleID})
 	}
 	if f.Level != "" {
-		where["level"] = f.Level
+		conds = append(conds, squirrel.Eq{"level": f.Level})
 	}
 	if f.Status != "" {
-		where["status"] = f.Status
+		conds = append(conds, squirrel.Eq{"status": f.Status})
 	}
+	if f.Search != "" {
+		like := "%" + escapeLike(f.Search) + "%"
+		conds = append(conds, squirrel.Or{
+			squirrel.ILike{"rule_title": like},
+			squirrel.ILike{"summary": like},
+			squirrel.ILike{"entity": like},
+			squirrel.ILike{"src_ip::text": like},
+		})
+	}
+	if f.Assignee != "" {
+		conds = append(conds, squirrel.Eq{"assignee": f.Assignee})
+	}
+	where := conds
 	q := r.db.Select(`id, organization_id, rule_id::text, rule_title, level, COALESCE(site_id::text,'') AS site_id,
                 COALESCE(asset_id::text,'') AS asset_id, COALESCE(src_ip::text,'') AS src_ip, entity, summary, event_ids, count, timeline, timestamp, status`).
 		From("detection_matches").Where(where)
@@ -202,6 +221,63 @@ func (r *MatchRepo) List(ctx context.Context, f MatchFilter) ([]domain.Detection
 		out = append(out, m)
 	}
 	return out, total, rows.Err()
+}
+
+// StatusCounts aggregates match counts per triage status under every filter
+// EXCEPT status itself. The console's status cards render these so the
+// numbers stay truthful while the list is paginated server-side.
+func (r *MatchRepo) StatusCounts(ctx context.Context, f MatchFilter) (map[string]int64, error) {
+	conds := squirrel.And{squirrel.Eq{"organization_id": f.OrgID}}
+	if f.RuleID != "" {
+		conds = append(conds, squirrel.Eq{"rule_id": f.RuleID})
+	}
+	if f.Level != "" {
+		conds = append(conds, squirrel.Eq{"level": f.Level})
+	}
+	if f.Search != "" {
+		like := "%" + escapeLike(f.Search) + "%"
+		conds = append(conds, squirrel.Or{
+			squirrel.ILike{"rule_title": like},
+			squirrel.ILike{"summary": like},
+			squirrel.ILike{"entity": like},
+			squirrel.ILike{"src_ip::text": like},
+		})
+	}
+	if f.Assignee != "" {
+		conds = append(conds, squirrel.Eq{"assignee": f.Assignee})
+	}
+	q := r.db.Select("status", "count(*)").From("detection_matches").Where(conds).GroupBy("status")
+	rows, err := r.db.Query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var status string
+		var n int64
+		if err := rows.Scan(&status, &n); err != nil {
+			return nil, err
+		}
+		out[status] = n
+	}
+	return out, rows.Err()
+}
+
+// SetAssignee gives a match an owner (F2). Returns ErrNotFound when the
+// row (org-scoped) does not exist so silent no-ops are impossible.
+func (r *MatchRepo) SetAssignee(ctx context.Context, orgID, id, assignee string) error {
+	q := r.db.Update("detection_matches").
+		Set("assignee", assignee).
+		Where(squirrel.Eq{"id": id, "organization_id": orgID})
+	cmd, err := r.db.Exec(ctx, q)
+	if err != nil {
+		return err
+	}
+	if cmd.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // ==================================================================== baselines

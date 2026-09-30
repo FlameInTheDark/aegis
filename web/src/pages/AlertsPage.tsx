@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsUnderlineList, TabsUnderlineTrigger } from "@/components/ui/tabs";
 import { EmptyState, PageHeader, SeverityBadge, StatusDot, TableFooterBar } from "@/components/shared";
+import { SavedViewsBar } from "@/components/saved-views/SavedViewsBar";
 import { usePageSize } from "@/lib/pagination";
 import { useAlertOccurrences, type AlertOccurrence } from "@/lib/queries.alerts";
 import { OccurrenceDetail } from "@/components/alerts/OccurrenceDetail";
@@ -42,6 +43,7 @@ export function AlertsPage() {
       <PageHeader
         title="Alerts"
         description="Operational conditions, occurrences, and destinations"
+        actions={<SavedViewsBar page="alerts" />}
       />
       <Tabs value={tab} onValueChange={changeTab}>
         <TabsUnderlineList>

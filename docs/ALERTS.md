@@ -37,7 +37,12 @@ repeat semantics.
 - **Delivery** — per occurrence and destination. Webhook deliveries carry
   an HMAC-SHA256 signature (`X-Aegis-Signature: sha256=<hex>`), retry with
   exponential backoff up to five attempts, and dead-letter afterwards for
-  manual replay. The console alert itself is always available regardless
+  manual replay. **Email destinations** (kind `email`) reuse the exact
+  same lifecycle — test send, attempt log, replay, dead-letter — and
+  deliver a plain-text body (title, severity, entity, console link)
+  through an org-configured SMTP submission (implicit TLS on 465,
+  STARTTLS on 587, optional auth; the SMTP password rides the masked
+  `secret` field). The console alert itself is always available regardless
   of destinations.
 
 ## Safety properties
@@ -65,8 +70,9 @@ The **Alerts** area has four views:
   bounded test runs. Preview validates against current data without
   creating alerts; a test distinguishes "no sample", "no match" and
   "matched" instead of presenting an empty result as success.
-- **Destinations** — webhook management with masked secrets, test
-  delivery, per-destination delivery health and dead-letter replay.
+- **Destinations** — webhook and email (SMTP submission) management with
+  masked secrets, test delivery, per-destination delivery health and
+  dead-letter replay.
 
 Every alert is visible in the console by itself; destinations add
 delivery, they do not gate visibility.

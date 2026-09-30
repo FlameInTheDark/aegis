@@ -14,6 +14,7 @@ const AssetsPage = React.lazy(() => import("@/pages/AssetsPage").then((m) => ({ 
 const AssetDetailPage = React.lazy(() => import("@/pages/AssetDetailPage").then((m) => ({ default: m.AssetDetailPage })));
 const TopologyPage = React.lazy(() => import("@/pages/TopologyPage").then((m) => ({ default: m.TopologyPage })));
 const ScansPage = React.lazy(() => import("@/pages/ScansPage").then((m) => ({ default: m.ScansPage })));
+const ChangesPage = React.lazy(() => import("@/pages/ChangesPage").then((m) => ({ default: m.ChangesPage })));
 const VulnerabilitiesPage = React.lazy(() => import("@/pages/VulnerabilitiesPage").then((m) => ({ default: m.VulnerabilitiesPage })));
 const FindingsPage = React.lazy(() => import("@/pages/FindingsPage").then((m) => ({ default: m.FindingsPage })));
 const DetectionsPage = React.lazy(() => import("@/pages/DetectionsPage").then((m) => ({ default: m.DetectionsPage })));
@@ -50,6 +51,11 @@ function Routes() {
     case "overview":
       page = <OverviewPage />;
       break;
+    case "auth":
+      // OIDC callback redirect target: the session restores via the refresh
+      // cookie during boot; bounce into the console once that settles.
+      page = <OidcComplete />;
+      break;
     case "assets":
       page = id ? <AssetDetailPage id={id} /> : <AssetsPage />;
       break;
@@ -58,6 +64,9 @@ function Routes() {
       break;
     case "scans":
       page = <ScansPage />;
+      break;
+    case "changes":
+      page = <ChangesPage />;
       break;
     case "vulnerabilities":
       page = <VulnerabilitiesPage />;
@@ -146,6 +155,24 @@ class PageErrorBoundary extends React.Component<
     }
     return this.props.children;
   }
+}
+
+/** OIDC callback landing: the refresh cookie restores the session on boot,
+ * then we bounce into the console proper. */
+function OidcComplete() {
+  const { navigate } = useRouter();
+  React.useEffect(() => {
+    const t = setTimeout(() => navigate("/overview"), 300);
+    return () => clearTimeout(t);
+  }, [navigate]);
+  return (
+    <div className="flex h-screen w-full items-center justify-center bg-background">
+      <div className="flex flex-col items-center gap-3">
+        <div className="glow-primary flex size-11 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-[oklch(0.55_0.2_300)] text-base font-bold text-primary-foreground">Æ</div>
+        <Loader2 className="size-4 animate-spin text-muted-foreground" />
+      </div>
+    </div>
+  );
 }
 
 /** Route guard: splash while restoring, login when unauthenticated. */

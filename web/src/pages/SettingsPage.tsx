@@ -7,7 +7,6 @@ import {
   Download,
   Globe,
   Info,
-  KeyRound,
   ListFilter,
   MoreHorizontal,
   Plus,
@@ -23,6 +22,9 @@ import {
   UserRound,
   Users as UsersIcon,
   type LucideIcon,
+  Radio,
+  Plug,
+  KeyRound,
 } from "lucide-react";
 
 import { cn, timeAgo, formatDateTime, formatNumber } from "@/lib/utils";
@@ -49,8 +51,12 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Separator } from "@/components/ui/separator";
 import { toast } from "@/components/ui/toaster";
 import { EmptyState, Mono, PageHeader, StateBadge, TableFooterBar, usePagination } from "@/components/shared";
+import { SensorsSection } from "@/components/settings/SensorsSection";
+import { IntegrationsSection } from "@/components/settings/IntegrationsSection";
+import { SsoSection } from "@/components/settings/SsoSection";
+import { UsersSection } from "@/components/settings/UsersSection";
 
-type Section = "sites" | "account" | "presets" | "users" | "scanners" | "feeds" | "metrics" | "audit";
+type Section = "sites" | "account" | "presets" | "users" | "scanners" | "feeds" | "metrics" | "audit" | "sensors" | "integrations" | "sso";
 
 const sections: { id: Section; label: string; icon: LucideIcon; blurb: string }[] = [
   { id: "sites", label: "Sites", icon: Building2, blurb: "Sites, networks and address ranges" },
@@ -61,6 +67,9 @@ const sections: { id: Section; label: string; icon: LucideIcon; blurb: string }[
   { id: "feeds", label: "Feeds", icon: Rss, blurb: "CVE, KEV, EPSS and OVAL sources" },
   { id: "metrics", label: "Metrics", icon: Database, blurb: "Performance data retention and storage" },
   { id: "audit", label: "Audit log", icon: ScrollText, blurb: "Immutable record of all actions" },
+  { id: "sensors", label: "Sensors", icon: Radio, blurb: "Ingest tokens, collector snippets and test ingest" },
+  { id: "integrations", label: "Integrations", icon: Plug, blurb: "GitHub, Jira and AWS connections" },
+  { id: "sso", label: "Single sign-on", icon: KeyRound, blurb: "OIDC provider for this organization" },
 ];
 
 export function SettingsPage() {
@@ -100,6 +109,9 @@ export function SettingsPage() {
           {tab === "feeds" && <FeedsSection />}
           {tab === "metrics" && <MetricsSection />}
           {tab === "audit" && <AuditSection />}
+          {tab === "sensors" && <SensorsSection />}
+          {tab === "integrations" && <IntegrationsSection />}
+          {tab === "sso" && <SsoSection />}
         </div>
       </div>
     </div>
@@ -814,261 +826,6 @@ function PresetsSection() {
           </DialogContent>
         </Dialog>
       )}
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-function UsersSection() {
-  const me = useMe();
-  const usersQ = useUsers();
-  const createUser = useCreateUser();
-  const updateUser = useUpdateUser();
-  const resetPw = useResetUserPassword();
-  const [invite, setInvite] = React.useState(false);
-  const [email, setEmail] = React.useState("");
-  const [name, setName] = React.useState("");
-  const [role, setRole] = React.useState("operator");
-  const [password, setPassword] = React.useState("");
-  const [resetTarget, setResetTarget] = React.useState<User | null>(null);
-  const [resetPwValue, setResetPwValue] = React.useState("");
-
-  const users = usersQ.data ?? [];
-  const pagedUsers = usePagination(users, "users");
-  const myId = me.data?.user?.id;
-
-  const inviteUser = () => {
-    createUser.mutate(
-      { email, name, role, password },
-      {
-        onSuccess: () => {
-          toast({ title: "User created", description: `${name || email} can sign in now.`, variant: "success" });
-          setInvite(false);
-          setEmail("");
-          setName("");
-          setPassword("");
-        },
-        onError: (e) => toast({ title: "Invite failed", description: (e as Error).message, variant: "error" }),
-      },
-    );
-  };
-
-  const roleTone: Record<string, "primary" | "high" | "low" | "info"> = {
-    owner: "primary",
-    administrator: "primary",
-    security_analyst: "low",
-    operator: "high",
-    viewer: "info",
-  };
-
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <div className="flex gap-2 text-xs">
-          <Badge variant="outline" className="py-1">
-            {users.filter((u) => u.status === "active").length} active
-          </Badge>
-          <Badge variant="outline" className="py-1">
-            {users.filter((u) => u.status === "disabled").length} disabled
-          </Badge>
-        </div>
-        <Button size="sm" onClick={() => setInvite(true)}>
-          <Plus /> Add user
-        </Button>
-      </div>
-      <div className="overflow-hidden rounded-xl border bg-card">
-        <Table>
-          <TableHeader>
-            <TableRow className="hover:bg-transparent">
-              <TableHead className="pl-4">User</TableHead>
-              <TableHead>Role</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Last active</TableHead>
-              <TableHead className="w-10" />
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {pagedUsers.slice.map((u) => (
-              <TableRow key={u.id}>
-                <TableCell className="pl-4">
-                  <div className="flex items-center gap-2.5">
-                    <span className="flex size-7 items-center justify-center rounded-full bg-primary/15 text-[10px] font-semibold text-primary">
-                      {u.name
-                        .split(" ")
-                        .map((p) => p[0])
-                        .join("")
-                        .slice(0, 2)}
-                    </span>
-                    <div className="leading-tight">
-                      <div className="font-medium">
-                        {u.name} {u.id === myId && <span className="text-xs text-muted-foreground">(you)</span>}
-                      </div>
-                      <div className="text-[11px] text-muted-foreground">{u.email}</div>
-                    </div>
-                  </div>
-                </TableCell>
-                <TableCell>
-                  <Select
-                    value={u.role}
-                    onValueChange={(v) =>
-                      updateUser.mutate(
-                        { id: u.id, role: v },
-                        {
-                          onSuccess: () => toast({ title: "Role updated", variant: "success" }),
-                          onError: (e) => toast({ title: "Role change failed", description: (e as Error).message, variant: "error" }),
-                        },
-                      )
-                    }
-                    disabled={u.id === myId}
-                  >
-                    <SelectTrigger size="sm" className="h-7 w-36 border-transparent bg-transparent text-xs hover:bg-accent/50">
-                      <Badge variant={roleTone[u.role] ?? "info"} className="capitalize">
-                        {u.role.replace("_", " ")}
-                      </Badge>
-                    </SelectTrigger>
-                    <SelectContent>
-                      {["owner", "administrator", "security_analyst", "operator", "viewer"].map((r) => (
-                        <SelectItem key={r} value={r} className="capitalize">
-                          {r.replace("_", " ")}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </TableCell>
-                <TableCell>
-                  <StateBadge label={u.status} tone={u.status === "active" ? "success" : "muted"} />
-                </TableCell>
-                <TableCell className="tabular text-xs text-muted-foreground">{u.lastActive ? timeAgo(u.lastActive) : "—"}</TableCell>
-                <TableCell>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <Button variant="ghost" size="icon-xs" className="text-muted-foreground">
-                        <MoreHorizontal />
-                      </Button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end">
-                      <DropdownMenuItem
-                        onClick={() => {
-                          setResetTarget(u);
-                          setResetPwValue("");
-                        }}
-                      >
-                        <KeyRound /> Reset password
-                      </DropdownMenuItem>
-                      <DropdownMenuSeparator />
-                      {u.status === "disabled" ? (
-                        <DropdownMenuItem
-                          onClick={() =>
-                            updateUser.mutate(
-                              { id: u.id, disabled: false },
-                              { onSuccess: () => toast({ title: "Account re-enabled", variant: "success" }) },
-                            )
-                          }
-                        >
-                          Re-enable
-                        </DropdownMenuItem>
-                      ) : (
-                        <DropdownMenuItem
-                          variant="destructive"
-                          disabled={u.id === myId}
-                          onClick={() =>
-                            updateUser.mutate(
-                              { id: u.id, disabled: true },
-                              { onSuccess: () => toast({ title: "Account disabled", variant: "warning" }) },
-                            )
-                          }
-                        >
-                          Disable account
-                        </DropdownMenuItem>
-                      )}
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-        {pagedUsers.slice.length > 0 && <TableFooterBar total={pagedUsers.total} page={pagedUsers.page} pageSize={pagedUsers.pageSize} onPage={pagedUsers.setPage} onPageSize={pagedUsers.setPageSize} label="users" />}
-      </div>
-
-      <Dialog open={invite} onOpenChange={setInvite}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Add user</DialogTitle>
-            <DialogDescription>Creates the account with a temporary password. The user should change it after first sign-in.</DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-3">
-            <div className="grid gap-1.5">
-              <Label>Email</Label>
-              <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="name@company.example" />
-            </div>
-            <div className="grid gap-1.5">
-              <Label>Name</Label>
-              <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Full name" />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="grid gap-1.5">
-                <Label>Role</Label>
-                <Select value={role} onValueChange={setRole}>
-                  <SelectTrigger className="w-full">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="administrator">Administrator — full access incl. settings</SelectItem>
-                    <SelectItem value="security_analyst">Analyst — triage findings &amp; detections</SelectItem>
-                    <SelectItem value="operator">Operator — run scans, manage assets</SelectItem>
-                    <SelectItem value="viewer">Viewer — read-only</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="grid gap-1.5">
-                <Label>Temporary password</Label>
-                <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
-              </div>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setInvite(false)}>
-              Cancel
-            </Button>
-            <Button onClick={inviteUser} disabled={!email.trim() || !password || createUser.isPending}>
-              Create user
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog open={!!resetTarget} onOpenChange={(o) => !o && setResetTarget(null)}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Reset password — {resetTarget?.name}</DialogTitle>
-            <DialogDescription>Sets a new temporary password. All existing sessions keep working until their tokens expire.</DialogDescription>
-          </DialogHeader>
-          <Input type="password" value={resetPwValue} onChange={(e) => setResetPwValue(e.target.value)} placeholder="New temporary password" />
-          <DialogFooter>
-            <Button variant="ghost" onClick={() => setResetTarget(null)}>
-              Cancel
-            </Button>
-            <Button
-              disabled={!resetPwValue}
-              onClick={() =>
-                resetPw.mutate(
-                  { id: resetTarget!.id, password: resetPwValue },
-                  {
-                    onSuccess: () => {
-                      toast({ title: "Password reset", variant: "success" });
-                      setResetTarget(null);
-                    },
-                    onError: (e) => toast({ title: "Reset failed", description: (e as Error).message, variant: "error" }),
-                  },
-                )
-              }
-            >
-              Reset
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

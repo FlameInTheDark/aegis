@@ -1,6 +1,7 @@
 import * as React from "react";
 import { Loader2, Lock, ShieldCheck } from "lucide-react";
 
+import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,6 +15,13 @@ export function LoginPage() {
   const [password, setPassword] = React.useState("");
   const [error, setError] = React.useState("");
   const [busy, setBusy] = React.useState(false);
+  // F4: enabled OIDC providers for the orgs this deployment exposes.
+  const [providers, setProviders] = React.useState<{ organization_id: string; organization_name: string }[]>([]);
+  React.useEffect(() => {
+    api.get<{ items: { organization_id: string; organization_name: string }[] }>("/auth/sso/providers")
+      .then((res) => setProviders(res.items ?? []))
+      .catch(() => setProviders([]));
+  }, []);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -89,6 +97,24 @@ export function LoginPage() {
             </Button>
           </div>
         </form>
+
+        {providers.length > 0 && (
+          <div className="mt-4 grid gap-2">
+            <div className="flex items-center gap-3 text-[11px] uppercase tracking-wider text-muted-foreground">
+              <span className="h-px flex-1 bg-border" /> or sign in with SSO <span className="h-px flex-1 bg-border" />
+            </div>
+            {providers.map((p) => (
+              <a
+                key={p.organization_id}
+                href={`/api/v1/auth/oidc/start?organization_id=${encodeURIComponent(p.organization_id)}`}
+                className="flex h-10 w-full items-center justify-center gap-2 rounded-md border bg-card text-sm font-medium transition-colors hover:bg-accent"
+              >
+                <ShieldCheck className="size-4" />
+                {p.organization_name || "Organization"} SSO
+              </a>
+            ))}
+          </div>
+        )}
 
         <p className="mt-4 flex items-center justify-center gap-1.5 text-center text-[11px] text-muted-foreground">
           <ShieldCheck className="size-3" />

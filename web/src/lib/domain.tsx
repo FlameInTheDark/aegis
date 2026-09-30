@@ -25,6 +25,7 @@ import {
   Workflow,
   HelpCircle,
   type LucideIcon,
+  GitCompare,
 } from "lucide-react";
 
 import type { AssetType } from "@/data/types";
@@ -59,6 +60,7 @@ export const navGroups: NavGroup[] = [
       { id: "scans", label: "Scans", path: "/scans", icon: Radar, description: "Discovery and vulnerability jobs" },
       { id: "vulnerabilities", label: "Vulnerabilities", path: "/vulnerabilities", icon: Bug, description: "CVE index matched to inventory" },
       { id: "findings", label: "Findings", path: "/findings", icon: ShieldAlert, description: "Actionable issues per asset" },
+      { id: "changes", label: "Changes", path: "/changes", icon: GitCompare, description: "What scans observed changing across the estate" },
     ],
   },
   {

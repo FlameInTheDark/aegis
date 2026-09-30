@@ -14,11 +14,14 @@ import (
 
 	"github.com/FlameInTheDark/aegis/internal/agents"
 	"github.com/FlameInTheDark/aegis/internal/audit"
+	"github.com/FlameInTheDark/aegis/internal/cloud"
 	"github.com/FlameInTheDark/aegis/internal/config"
 	"github.com/FlameInTheDark/aegis/internal/connectors"
 	"github.com/FlameInTheDark/aegis/internal/detections"
+	"github.com/FlameInTheDark/aegis/internal/handoff"
 	"github.com/FlameInTheDark/aegis/internal/joblog"
 	"github.com/FlameInTheDark/aegis/internal/observability"
+	"github.com/FlameInTheDark/aegis/internal/oidc"
 	"github.com/FlameInTheDark/aegis/internal/organizations"
 	"github.com/FlameInTheDark/aegis/internal/platform"
 	"github.com/FlameInTheDark/aegis/internal/reports"
@@ -92,6 +95,15 @@ type Services struct {
 	Traces       *pg.TraceRepo
 	Reports      *pg.ReportRepo
 	Groups       *pg.GroupRepo
+	SavedViews   *pg.SavedViewRepo
+	Integrations *pg.IntegrationRepo
+	IngestTokens *pg.IngestTokenRepo
+	SSO          *pg.SSORepo
+	OIDC         *oidc.Client
+	Cloud        *cloud.Service
+
+	// Handoff pushes findings to external trackers (F6); stateless.
+	Handoff *handoff.Client
 
 	// Streaming surface (v1.13.0): job log history + browser fan-out.
 	JobLogs *joblog.Store
@@ -203,7 +215,12 @@ func (a *App) registerRoutes() {
 	limRefresh, _ := a.rateLimiter("auth-refresh", 120, time.Minute)
 	auth.Post("/login", a.handleLogin)
 	auth.Post("/refresh", limRefresh, a.handleRefresh)
+	auth.Post("/switch-organization", limRefresh, a.handleSwitchOrganization)
 	auth.Post("/logout", a.handleLogout)
+	// SSO browser flow (F4) — public, the IdP redirects here.
+	auth.Get("/sso/providers", a.handleSSOProviders)
+	auth.Post("/oidc/start", limRefresh, a.handleOIDCStart)
+	auth.Get("/oidc/callback", limRefresh, a.handleOIDCCallback)
 
 	// Streaming socket (v1.13.0): realtime job logs, scan state and
 	// notifications. The guard authenticates via the access_token query
@@ -248,6 +265,7 @@ func (a *App) registerRoutes() {
 	g.Get("/assets/:id/metrics", a.handleGetAssetMetrics)
 	g.Post("/assets/:id/notes", a.handleAddNote)
 	g.Get("/assets/:id/notes", a.handleListNotes)
+	g.Post("/assets/:id/sbom", a.handleUploadSBOM)
 	g.Post("/assets/:id/rediscover", a.handleRediscoverAsset)
 	g.Delete("/assets/:id", a.handleDeleteAsset)
 	g.Get("/services", a.handleListServices)
@@ -262,6 +280,18 @@ func (a *App) registerRoutes() {
 	g.Get("/scans/:id", a.handleGetScan)
 	g.Post("/scans/:id/cancel", a.handleCancelScan)
 	g.Get("/scans/:id/changes", a.handleScanChanges)
+	g.Get("/changes", a.handleListChanges)
+	g.Get("/views", a.handleListSavedViews)
+	g.Post("/views", a.handleCreateSavedView)
+	g.Delete("/views/:id", a.handleDeleteSavedView)
+	g.Get("/integrations/:kind", a.handleGetIntegrations)
+	g.Put("/integrations/:kind", a.handleUpsertIntegration)
+	g.Post("/integrations/aws/sync", a.handleAWSSync)
+	g.Get("/auth/sso", a.handleGetSSO)
+	g.Put("/auth/sso", a.handleUpsertSSO)
+	g.Delete("/auth/sso", a.handleDeleteSSO)
+	g.Post("/findings/:id/handoff", a.handleFindingHandoff)
+	g.Post("/findings/:id/handoff/refresh", a.handleHandoffRefresh)
 	g.Get("/scans/:id/logs", a.handleScanLogs)
 	g.Get("/scans/:id/tasks", a.handleScanTasks)
 	g.Get("/scan-profiles", a.handleListScanProfiles)
@@ -277,6 +307,7 @@ func (a *App) registerRoutes() {
 	g.Post("/scanners/:id/default", a.handleSetDefaultScanner)
 	g.Get("/schedules", a.handleListSchedules)
 	g.Post("/schedules", a.handleCreateSchedule)
+	g.Post("/schedules/preview", a.handlePreviewSchedule)
 	g.Delete("/schedules/:id", a.handleDeleteSchedule)
 
 	// Vulnerabilities & findings.
@@ -291,6 +322,7 @@ func (a *App) registerRoutes() {
 	g.Get("/findings/:id", a.handleGetFinding)
 	g.Patch("/findings/:id", a.handleUpdateFinding)
 	g.Post("/findings/bulk", a.handleBulkFindings)
+	g.Post("/findings/bulk-assign", a.handleBulkAssignFindings)
 	g.Post("/findings/:id/suppress", a.handleSuppressFinding)
 	g.Get("/feeds", a.handleListFeeds)
 	g.Post("/feeds/:name/sync", a.handleTriggerFeedSync)
@@ -306,6 +338,16 @@ func (a *App) registerRoutes() {
 	lim2, _ := a.rateLimiter("events", 120, time.Minute)
 	g.Get("/events", lim2, a.handleListEvents)
 	g.Post("/events/ingest", lim2, a.handleIngestEvent)
+	// Sensor setup (F11): ingest tokens + console test ingest.
+	g.Get("/events/tokens", a.handleListIngestTokens)
+	g.Post("/events/tokens", a.handleCreateIngestToken)
+	g.Delete("/events/tokens/:id", a.handleRevokeIngestToken)
+	g.Post("/events/test-ingest", lim2, a.handleTestIngest)
+
+	// Machine-to-machine sensor ingest (F11): token-authed, no JWT.
+	ing := api.Group("/ingest", a.authenticateIngestToken())
+	limIngest, _ := a.rateLimiter("ingest", 120, time.Minute)
+	ing.Post("/events", limIngest, a.handleIngestTokenEvent)
 
 	// External connections (unified connector registry).
 	g.Get("/connectors", a.handleListConnectors)

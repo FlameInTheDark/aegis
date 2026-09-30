@@ -8,6 +8,8 @@ export interface Page<T> {
   total: number
   page: number
   limit: number
+  /** optional per-status aggregate (detection matches triage cards) */
+  counts?: Record<string, number>
 }
 
 export interface Me {
@@ -80,6 +82,9 @@ export interface SoftwareRow {
   ecosystem?: string
   purl?: string
   source?: string
+  /** F14: not_queried | queried_clean | queried_findings */
+  osv_status?: string
+  osv_queried_at?: string
 }
 
 export interface Asset {
@@ -161,6 +166,7 @@ export interface Finding {
   severity: Severity
   status: string
   owner?: string
+  due_date?: string
   notes?: string
   remediation?: string
   first_seen: string
@@ -169,6 +175,11 @@ export interface Finding {
    *  software row; empty for heuristic findings without a link */
   product?: string
   version?: string
+  /** F6: external tracker handoff */
+  external_tracker?: string
+  external_key?: string
+  external_url?: string
+  external_synced_at?: string
 }
 
 export interface Evidence {
@@ -335,6 +346,8 @@ export interface ScanTask {
 
 export interface Change {
   id: string
+  scan_id?: string
+  site_id?: string
   type: string
   asset_id?: string
   entity?: string
@@ -362,11 +375,15 @@ export interface DetectionRule {
   identifier: string
   status: string
   description?: string
+  author?: string
+  event_type?: string
   level: Severity
   type: string
   window?: string
   enabled: boolean
   tags?: string[]
+  conditions?: { field: string; operator: string; values?: string[] }[]
+  threshold?: { count: number; distinct?: string }
 }
 
 export interface DetectionMatch {
@@ -380,6 +397,7 @@ export interface DetectionMatch {
   count: number
   timestamp: string
   status?: string
+  assignee?: string
   asset_id?: string
 }
 
@@ -398,6 +416,8 @@ export interface SecEvent {
   application?: string
   hostname?: string
   tags?: string[]
+  /** F11: console test-ingest rows are tagged synthetic */
+  synthetic?: boolean
 }
 
 /** Bound endpoint device summary (embedded in connector views). */
@@ -602,6 +622,10 @@ export interface SearchHit {
 }
 
 export interface MetricsSummary {
+  /** active findings past their due date (F2 investigation queue) */
+  overdue_findings?: number
+  /** scan change records of the last 7 days (F7) */
+  changes_7d?: number
   assets: number
   open_ports: number
   vulnerabilities: number
@@ -829,4 +853,69 @@ export interface AssetVulnDiagnostics {
   }[]
   enabled_actions: number
   sources: { cpe: boolean; osv: boolean; oval: boolean }
+}
+
+// ---------------------------------------------------------------------------
+// F7 change timeline, F12 saved views, F11 ingest tokens, F6 integrations, F4 SSO
+
+export interface ChangeTimelineRow {
+  id: string
+  scan_id: string
+  site_id: string
+  type: string
+  asset_id?: string
+  entity?: string
+  before?: string
+  after?: string
+  created_at: string
+}
+
+export interface SavedViewRow {
+  id: string
+  organization_id: string
+  user_id: string
+  page: string
+  name: string
+  query: string
+  created_at: string
+}
+
+export interface IngestTokenRow {
+  id: string
+  organization_id: string
+  name: string
+  prefix?: string
+  created_by?: string
+  created_at: string
+  revoked_at?: string
+  last_used_at?: string
+}
+
+export interface IntegrationRow {
+  id: string
+  organization_id: string
+  kind: string
+  config?: Record<string, unknown>
+  created_by?: string
+  created_at: string
+  updated_at: string
+  secret_masked?: string
+}
+
+export interface SSOConfigRow {
+  id: string
+  organization_id: string
+  issuer: string
+  client_id: string
+  groups_claim?: string
+  role_mappings?: Record<string, string>
+  default_role?: string
+  allow_jit?: boolean
+  enabled?: boolean
+  client_secret_masked?: string
+}
+
+export interface SSOProviderRow {
+  organization_id: string
+  organization_name: string
 }

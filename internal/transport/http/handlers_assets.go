@@ -2,6 +2,8 @@ package httpx
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -13,6 +15,7 @@ import (
 	"github.com/FlameInTheDark/aegis/internal/fingerprinting"
 	chx "github.com/FlameInTheDark/aegis/internal/repository/clickhouse"
 	pg "github.com/FlameInTheDark/aegis/internal/repository/postgres"
+	"github.com/FlameInTheDark/aegis/internal/sbom"
 	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 )
@@ -30,9 +33,13 @@ func (a *App) handleListAssets(c *fiber.Ctx) error {
 	} else if v == "false" {
 		hasAgent = boolPtr(false)
 	}
+	siteID, ferr := uuidFilterParam(c.Query("site_id"))
+	if ferr != nil {
+		return ferr
+	}
 	f := pg.AssetFilter{
 		OrgID:       claims.OrganizationID,
-		SiteID:      c.Query("site_id"),
+		SiteID:      siteID,
 		DeviceType:  c.Query("device_type"),
 		OS:          c.Query("os"),
 		Search:      c.Query("search"),
@@ -656,6 +663,80 @@ func (a *App) handleRediscoverAsset(c *fiber.Ctx) error {
 		map[string]any{"findings_created": n})
 	return c.JSON(fiber.Map{"findings_created": n, "detail": "matching refreshed against the current CVE index"})
 }
+
+// handleUploadSBOM ingests a CycloneDX JSON document as an inventory source
+// for one asset (POST /assets/:id/sbom). Components land as ordinary
+// software rows with source='sbom' — matching never grows a second path —
+// and the correlator runs immediately so findings appear without waiting
+// for the next scan. The document is untrusted input: body cap, component
+// cap, and a sha256 digest recorded on the asset for provenance.
+func (a *App) handleUploadSBOM(c *fiber.Ctx) error {
+	claims := a.claimsFrom(c)
+	if he := a.requirePerm(c, domain.PermAssetWrite); he != nil {
+		return he
+	}
+	assetID := c.Params("id")
+	asset, err := a.svc.Assets.ByID(Context(c), claims.OrganizationID, assetID)
+	if err != nil {
+		return NotFound("asset not found")
+	}
+	body := c.Body()
+	if len(body) == 0 {
+		return BadRequest("empty body")
+	}
+	if len(body) > maxSBOMBodyBytes {
+		return BadRequest("document exceeds the body cap")
+	}
+	pkgs, err := sbom.Parse(body)
+	if err != nil {
+		return BadRequest(err.Error())
+	}
+	digest := sha256.Sum256(body)
+	digestHex := hex.EncodeToString(digest[:])
+	imported := 0
+	for _, p := range pkgs {
+		sw := &domain.Software{
+			AssetID:   asset.ID,
+			Name:      p.Name,
+			Version:   p.Version,
+			Vendor:    p.Vendor,
+			Ecosystem: p.Ecosystem,
+			PURL:      p.PURL,
+			Source:    "sbom",
+		}
+		if p.Version != "" && p.Ecosystem != "" {
+			sw.VersionNorm = fingerprinting.NormalizeObservedVersion(p.Version, p.Ecosystem).Normalized
+		}
+		if err := a.svc.Software.Upsert(Context(c), sw); err != nil {
+			a.svc.Log.Warn("sbom software upsert failed", "asset", asset.ID, "package", p.Name, "err", err)
+			continue
+		}
+		imported++
+	}
+	if imported == 0 {
+		return Internal("sbom import failed")
+	}
+	if err := a.svc.Assets.MarkSBOM(Context(c), claims.OrganizationID, asset.ID, digestHex); err != nil {
+		a.svc.Log.Warn("sbom provenance mark failed", "asset", asset.ID, "err", err)
+	}
+	a.svc.AuditService.Entry(Context(c), claims.OrganizationID, claims.Subject, "asset.sbom_uploaded", "asset:"+asset.ID, c.IP(), "", "success",
+		map[string]any{"digest": digestHex, "components": len(pkgs), "imported": imported})
+	// Asset-scoped correlation is bounded; run it synchronously like
+	// rediscover so the response reflects real matching output.
+	findings := 0
+	if a.svc.Correlator != nil {
+		ctx, cancel := context.WithTimeout(Context(c), 2*time.Minute)
+		defer cancel()
+		if n, err := a.svc.Correlator.SweepAsset(ctx, claims.OrganizationID, asset.ID); err == nil {
+			findings = n
+		} else {
+			a.svc.Log.Warn("sbom correlation failed", "asset", asset.ID, "err", err)
+		}
+	}
+	return c.Status(201).JSON(fiber.Map{"imported": imported, "digest": digestHex, "findings_created": findings})
+}
+
+const maxSBOMBodyBytes = 8 << 20 // 8 MiB — the same cap the event ingest path applies
 
 // handleDeleteAsset removes an asset from the inventory (DELETE /assets/:id).
 // Deletion is the remedy for false discoveries, temporarily present hosts and

@@ -217,6 +217,33 @@ func renderPDF(d *reportData) ([]byte, string, error) {
 		c.y += lead
 	}
 
+	// Control mapping (F13): one wrapped line per control. The report
+	// carries the disclaimer in the note below the table — evidence
+	// mapping, never a certification.
+	if len(d.Controls) > 0 {
+		c.ensure(h2Size + lead)
+		c.text(pdfMargin, h2Size, "F2", fmt.Sprintf("Control mapping (catalog %s)", d.CatalogVersion))
+		c.y += lead + 2
+		for _, cr := range d.Controls {
+			for i, line := range pdfWrap(fmt.Sprintf("%s [%s] %s: %d matched finding(s) - %s",
+				cr.ID, cr.Source, cr.Name, cr.MatchedCount, cr.ObservedState), textSize, innerW) {
+				c.ensure(lead)
+				c.text(pdfMargin+float64(i)*8, textSize, "F1", line)
+				c.y += lead
+			}
+		}
+		if un, ok := d.Summary["assets_without_endpoint_evidence"].(int); ok {
+			for _, line := range pdfWrap(fmt.Sprintf("Assets without endpoint evidence: %d. \"No findings observed\" means no violations were seen - it does not assert the control is satisfied. Not a compliance certification.", un), 8.5, innerW) {
+				c.ensure(11)
+				c.gray(pdfMargin, 8.5, 0.45, "F1", line)
+				c.y += 11
+			}
+		}
+		c.y += 6
+		c.rule()
+		c.y += lead
+	}
+
 	// Findings as fixed-pitch rows with a wrapped title column.
 	if len(d.Findings) > 0 {
 		// Human labels for asset references: hostname → primary IP.

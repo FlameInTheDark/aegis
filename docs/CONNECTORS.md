@@ -297,3 +297,41 @@ Environment (server):
  stack, enrolls a real `aegis-connector` binary over gRPC, proves token
  burn/replay rejection, hot reload on a live process, reconnect rotation,
  revoke semantics and kind-mismatch rejection.
+
+## 7. Sensor ingest tokens (event feeds)
+
+An operator who enabled the Compose `sensors` profile still needs a path
+from a sensor to the event stream. Instead of handing out an analyst
+login to a machine, ingest uses dedicated tokens:
+
+- `POST /api/v1/ingest/tokens` (`event:write`) mints an
+ `aeg_evt_…` token; only its SHA-256 hash is stored (migration `0045`)
+ and the raw material is shown once. Tokens are revocable and last-use
+ liveness is tracked; the Settings Sensors panel shows a per-token
+ "last event received" age.
+- `POST /api/v1/ingest/events` authenticates with the token (its own
+ rate limit, independent of the user-facing `POST /events/ingest`) and
+ accepts the same Suricata EVE / Zeek / Snort JSON payloads as the
+ interactive route.
+- The Settings Sensors panel also renders copy-ready Vector and
+ Filebeat snippets for Suricata EVE and Zeek JSON, and a "test ingest"
+ button pushes the bundled `testdata/feeds/` fixtures through the real
+ pipeline — those rows are tagged `synthetic` in ClickHouse and rendered
+ with a `[synthetic]` prefix on the Events page, the same honesty rule
+ demo scans follow.
+
+## 8. Cloud account sync (AWS, first slice)
+
+For inventory that a network scan never sees, `POST
+/api/v1/integrations/aws/sync` pulls one AWS account's EC2 instances
+(read-only credentials stored in `org_integrations`, migration `0042`)
+and lands each instance as an ordinary asset in a chosen site:
+
+- correlation is strong on instance id (`cloud_instance` identifier),
+ weak on private IP, using the same weighted identifier rules as every
+ other source;
+- public IPv4 addresses set the asset's exposure on create;
+- findings only appear once a scan or an agent sees software — the sync
+ widens inventory, it does not invent findings.
+
+Azure and GCP land behind the same observation shape in later slices.

@@ -10,7 +10,7 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 - name: AEGIS_ENV
   value: {{ .Values.config.env }}
 - name: AEGIS_DATABASE_URL
-  valueFrom: { secretKeyRef: { name: {{ .Release.Name }}-aegis-secret, key: database-url } }
+  valueFrom: { secretKeyRef: { name: {{ .Values.secrets.existingSecret | default (printf "%s-aegis-secret" .Release.Name) }}, key: database-url } }
 - name: AEGIS_REDIS_URL
   value: {{ .Values.config.redisURL }}
 - name: AEGIS_NATS_URL
@@ -18,5 +18,5 @@ app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 - name: AEGIS_CLICKHOUSE_URL
   value: {{ .Values.config.clickhouseURL }}
 - name: AEGIS_JWT_SECRET
-  valueFrom: { secretKeyRef: { name: {{ .Release.Name }}-aegis-secret, key: jwt-secret } }
+  valueFrom: { secretKeyRef: { name: {{ .Values.secrets.existingSecret | default (printf "%s-aegis-secret" .Release.Name) }}, key: jwt-secret } }
 {{- end -}}

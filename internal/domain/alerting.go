@@ -2,6 +2,9 @@ package domain
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -57,6 +60,7 @@ const (
 const (
 	DestinationWebhook = "webhook"
 	DestinationInApp   = "in_app"
+	DestinationEmail   = "email"
 )
 
 // Missing-data policies for metric triggers.
@@ -129,8 +133,58 @@ type Destination struct {
 	UpdatedAt     time.Time  `json:"updated_at"`
 	LastSuccessAt *time.Time `json:"last_success_at,omitempty"`
 	LastError     string     `json:"last_error"`
+	// Config carries non-secret per-kind settings (email: SMTP host, port,
+	// from, recipients). The email password rides Secret, so it inherits
+	// the existing never-serialize/mask/rotate treatment.
+	Config json.RawMessage `json:"config,omitempty"`
 	// SecretMasked is set by the repo layer for API responses.
 	SecretMasked string `json:"secret_masked,omitempty"`
+}
+
+// EmailDestinationConfig is the non-secret half of an email destination.
+type EmailDestinationConfig struct {
+	SMTPHost string   `json:"smtp_host"`
+	SMTPPort int      `json:"smtp_port"`
+	From     string   `json:"from"`
+	To       []string `json:"to"`
+}
+
+// ParseEmailConfig decodes and sanity-checks a destination's email config.
+func ParseEmailConfig(raw json.RawMessage) (EmailDestinationConfig, error) {
+	var c EmailDestinationConfig
+	if len(raw) == 0 {
+		return c, errors.New("email config missing")
+	}
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return c, fmt.Errorf("invalid email config: %w", err)
+	}
+	if c.SMTPHost == "" {
+		return c, errors.New("smtp_host is required")
+	}
+	if c.SMTPPort == 0 {
+		c.SMTPPort = 587
+	}
+	if c.SMTPPort < 1 || c.SMTPPort > 65535 {
+		return c, errors.New("smtp_port out of range")
+	}
+	if !looksLikeEmail(c.From) {
+		return c, errors.New("from must be an email address")
+	}
+	if len(c.To) == 0 {
+		return c, errors.New("at least one recipient is required")
+	}
+	for _, r := range c.To {
+		if !looksLikeEmail(r) {
+			return c, fmt.Errorf("recipient %q is not an email address", r)
+		}
+	}
+	return c, nil
+}
+
+func looksLikeEmail(s string) bool {
+	s = strings.TrimSpace(s)
+	at := strings.Index(s, "@")
+	return at > 0 && at < len(s)-1 && !strings.ContainsAny(s, " \t\r\n")
 }
 
 // Occurrence is one alert episode.

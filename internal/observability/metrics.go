@@ -29,6 +29,10 @@ type Metrics struct {
 	EventsIngestedTotal   *prometheus.CounterVec
 	EventsDroppedTotal    *prometheus.CounterVec
 	DetectionMatchesTotal *prometheus.CounterVec
+	// DetectionRulesSkippedTotal counts rules the evaluator refused to run —
+	// unknown rule types in particular. A silent skip hid catalog corruption;
+	// the counter makes it visible (plan Phase 1.3).
+	DetectionRulesSkippedTotal *prometheus.CounterVec
 
 	AgentConnected          prometheus.Gauge
 	AgentLastSeenSeconds    *prometheus.GaugeVec
@@ -87,6 +91,9 @@ func New(namespace string) *Metrics {
 	m.DetectionMatchesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: namespace, Name: "detection_matches_total",
 		Help: "Detection matches."}, []string{"service", "rule_type"})
+	m.DetectionRulesSkippedTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace, Name: "detection_rules_skipped_total",
+		Help: "Detection rules skipped by the evaluator (unsupported type)."}, []string{"service", "rule_type"})
 	m.AgentConnected = prometheus.NewGauge(prometheus.GaugeOpts{
 		Namespace: namespace, Name: "agent_connected", Help: "Agents currently connected."})
 	m.AgentLastSeenSeconds = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -104,7 +111,7 @@ func New(namespace string) *Metrics {
 		m.HTTPRequestsTotal, m.HTTPDurationSeconds, m.DBQueryDuration,
 		m.ScannerTasksTotal, m.ScannerTaskDuration, m.ScannerTargetsTotal, m.ScannerPortsTotal,
 		m.FingerprintsTotal, m.VulnMatchesTotal, m.FeedSyncTotal, m.FeedSyncDurationSeconds,
-		m.EventsIngestedTotal, m.EventsDroppedTotal, m.DetectionMatchesTotal,
+		m.EventsIngestedTotal, m.EventsDroppedTotal, m.DetectionMatchesTotal, m.DetectionRulesSkippedTotal,
 		m.AgentConnected, m.AgentLastSeenSeconds, m.NATSConsumerLag, m.ClickhouseInsertLatency,
 	)
 	return m

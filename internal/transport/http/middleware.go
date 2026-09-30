@@ -356,6 +356,75 @@ func (a *App) handleLogout(c *fiber.Ctx) error {
 	return c.SendStatus(204)
 }
 
+// handleSwitchOrganization POST /auth/switch-organization — rotate the
+// caller's access token into another organization they belong to (F3).
+//
+// The session (refresh cookie) is re-pointed at the chosen membership and
+// a fresh access JWT is issued for it; every data query stays scoped to
+// the caller's token org, so switching is the ONLY path to cross-org
+// visibility — there is no aggregation across organizations. Membership
+// is re-resolved from the DATABASE (never client data) and the switch is
+// audited. Requires the XHR header like the other cookie endpoints.
+func (a *App) handleSwitchOrganization(c *fiber.Ctx) error {
+	if !requireXHR(c) {
+		return Forbidden("missing " + xhrHeaderName + " header")
+	}
+	var req struct {
+		OrganizationID string `json:"organization_id"`
+	}
+	if err := c.BodyParser(&req); err != nil || req.OrganizationID == "" {
+		return BadRequest("organization_id is required")
+	}
+	ctx := Context(c)
+	token := c.Cookies(a.refreshCookieName())
+	if token == "" {
+		return Unauthorized("not signed in")
+	}
+	s, err := a.svc.Sessions.ByRefreshHash(ctx, hashRefresh(token))
+	if errors.Is(err, pg.ErrNotFound) {
+		return Unauthorized("session expired or revoked")
+	}
+	if err != nil {
+		a.svc.Log.Error("org switch session lookup failed", "err", err)
+		return Unavailable("session store unavailable; try again shortly")
+	}
+	user, err := a.svc.Users.ByID(ctx, s.UserID)
+	if errors.Is(err, pg.ErrNotFound) || (err == nil && user.Disabled) {
+		_ = a.svc.Sessions.Revoke(ctx, s.ID)
+		return Unauthorized("account disabled")
+	}
+	if err != nil {
+		a.svc.Log.Error("org switch user lookup failed", "err", err)
+		return Unavailable("user store unavailable; try again shortly")
+	}
+	role, err := a.svc.Memberships.RoleFor(ctx, user.ID, req.OrganizationID)
+	if errors.Is(err, pg.ErrNotFound) {
+		// Not a member: audit the denial like a failed login.
+		a.svc.AuditService.Entry(ctx, s.OrganizationID, user.ID, audit.ActionOrgSwitch, "org:"+req.OrganizationID, c.IP(), "", "denied",
+			map[string]any{"reason": "not a member"})
+		return Forbidden("not a member of that organization")
+	}
+	if err != nil {
+		a.svc.Log.Error("org switch membership lookup failed", "err", err)
+		return Unavailable("membership store unavailable; try again shortly")
+	}
+	if err := a.svc.Sessions.SetOrganization(ctx, s.ID, req.OrganizationID); err != nil {
+		return Internal("organization switch failed")
+	}
+	issuer := auth.NewTokenIssuer(a.svc.Cfg.Auth.JWTSecret, a.svc.Cfg.Auth.AccessTokenTTL, a.svc.Cfg.Auth.RefreshTokenTTL)
+	access, err := issuer.IssueAccess(user.ID, req.OrganizationID, role, permStrings(auth.PermissionsFor(role)), s.ID)
+	if err != nil {
+		return Internal("token issuance failed")
+	}
+	a.svc.AuditService.Entry(ctx, req.OrganizationID, user.ID, audit.ActionOrgSwitch, "org:"+req.OrganizationID, c.IP(), "", "success",
+		map[string]any{"from": s.OrganizationID, "role": string(role)})
+	return c.JSON(tokenResponse{
+		AccessToken: access,
+		ExpiresIn:   int(a.svc.Cfg.Auth.AccessTokenTTL.Seconds()),
+		User:        &tokenUser{ID: user.ID, Email: user.Email, Name: user.Name},
+	})
+}
+
 // handleMe returns the caller profile + org memberships.
 func (a *App) handleMe(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)

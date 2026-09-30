@@ -47,6 +47,7 @@ func (f *fakeDevices) ByConnector(_ context.Context, connectorID string) (*domai
 type fakePlane struct {
 	inventories []string // agent IDs that received inventory
 	touched     []string
+	software    []domain.Software // packages applied via ApplySoftwareInventory
 }
 
 func (f *fakePlane) LinkInventory(_ context.Context, agentID string, _ *domain.SystemInventory) error {
@@ -65,6 +66,11 @@ func (f *fakePlane) PendingTasks(_ context.Context, _ string) ([]domain.AgentTas
 }
 func (f *fakePlane) CompleteTask(_ context.Context, _ string, _ map[string]any, _ string) error {
 	return nil
+}
+
+func (f *fakePlane) ApplySoftwareInventory(_ context.Context, _ string, pkgs []domain.Software) (int, error) {
+	f.software = append(f.software, pkgs...)
+	return len(pkgs), nil
 }
 
 func newTestServer(auth *fakeAuth, dev *fakeDevices, plane *fakePlane) *AgentServer {

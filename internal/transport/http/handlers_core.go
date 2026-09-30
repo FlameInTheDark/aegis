@@ -307,7 +307,10 @@ func (a *App) handleListNotes(c *fiber.Ctx) error {
 func (a *App) handleMetricsSummary(c *fiber.Ctx) error {
 	claims := a.claimsFrom(c)
 	ctx := Context(c)
-	siteID := c.Query("site_id")
+	siteID, ferr := uuidFilterParam(c.Query("site_id"))
+	if ferr != nil {
+		return ferr
+	}
 
 	assets, _, err := a.svc.Assets.List(ctx, pg.AssetFilter{OrgID: claims.OrganizationID, SiteID: siteID, Limit: 200})
 	if err != nil {
@@ -347,6 +350,8 @@ func (a *App) handleMetricsSummary(c *fiber.Ctx) error {
 		"kev":              a.kevFindingsCount(ctx, claims.OrganizationID),
 		"high_risk_assets": highRiskAssets,
 		"active_alerts":    a.activeAlertsCount(ctx, claims.OrganizationID),
+		"overdue_findings": a.overdueFindingsCount(ctx, claims.OrganizationID),
+		"changes_7d":       a.changesLastWeekCount(ctx, claims.OrganizationID),
 		"by_severity": map[string]int{
 			"critical": critical, "high": high, "medium": med, "low": low, "info": info,
 		},
@@ -377,6 +382,87 @@ func (a *App) kevFindingsCount(ctx gocontext.Context, orgID string) int {
 		_ = a.svc.Redis.CacheSet(ctx, cacheKey, n, 5*time.Minute)
 	}
 	return n
+}
+
+// overdueFindingsCount counts active findings past their due date (F2).
+// The aggregate lives in the repo so Overview and reports share one
+// definition of "overdue".
+func (a *App) overdueFindingsCount(ctx gocontext.Context, orgID string) int64 {
+	n, err := a.svc.Findings.OverdueCount(ctx, orgID)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// changesLastWeekCount counts scan change records of the last seven days
+// (F7): the Overview tile answers "what appeared on this site since last
+// week" without diffing two scan rows by hand.
+func (a *App) changesLastWeekCount(ctx gocontext.Context, orgID string) int {
+	n, err := a.svc.Changes.ChangesSince(ctx, orgID, time.Now().UTC().Add(-7*24*time.Hour))
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// ---------------------------------------------------------------------------
+// Saved views (F12): named query strings per user on the pages that have
+// real filter surfaces. No dedicated permission — a view is personal data
+// scoped to the caller's own user id, like a note to self.
+
+func (a *App) handleListSavedViews(c *fiber.Ctx) error {
+	claims := a.claimsFrom(c)
+	page := c.Query("page")
+	if !domain.ValidSavedViewPage(page) {
+		return BadRequest("unknown page")
+	}
+	items, err := a.svc.SavedViews.List(Context(c), claims.OrganizationID, claims.Subject, page)
+	if err != nil {
+		return Internal("saved views list failed")
+	}
+	return c.JSON(fiber.Map{"items": items})
+}
+
+func (a *App) handleCreateSavedView(c *fiber.Ctx) error {
+	claims := a.claimsFrom(c)
+	var req struct {
+		Page  string `json:"page"`
+		Name  string `json:"name"`
+		Query string `json:"query"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return BadRequest("invalid body")
+	}
+	if !domain.ValidSavedViewPage(req.Page) {
+		return BadRequest("unknown page")
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" || len(req.Name) > 128 {
+		return BadRequest("name must be 1-128 characters")
+	}
+	if len(req.Query) > 2048 {
+		return BadRequest("query too long")
+	}
+	v := &domain.SavedView{
+		OrgID:  claims.OrganizationID,
+		UserID: claims.Subject,
+		Page:   req.Page,
+		Name:   req.Name,
+		Query:  req.Query,
+	}
+	if err := a.svc.SavedViews.Create(Context(c), v); err != nil {
+		return Internal("saved view create failed")
+	}
+	return c.Status(201).JSON(v)
+}
+
+func (a *App) handleDeleteSavedView(c *fiber.Ctx) error {
+	claims := a.claimsFrom(c)
+	if err := a.svc.SavedViews.Delete(Context(c), claims.OrganizationID, claims.Subject, c.Params("id")); err != nil {
+		return Internal("saved view delete failed")
+	}
+	return c.SendStatus(204)
 }
 
 func (a *App) activeAlertsCount(ctx gocontext.Context, orgID string) int {

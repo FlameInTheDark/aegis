@@ -44,13 +44,17 @@ const (
 	PermEventRead       Permission = "event:read"
 	PermEventWrite      Permission = "event:write" // telemetry ingestion
 	PermDetectionManage Permission = "detection:manage"
-	PermReportCreate    Permission = "report:create"
-	PermReportRead      Permission = "report:read"
-	PermAuditRead       Permission = "audit:read"
-	PermSettingsManage  Permission = "settings:manage"
-	PermFeedManage      Permission = "feed:manage"
-	PermAlertRead       Permission = "alert:read"
-	PermAlertManage     Permission = "alert:manage"
+	// PermDetectionRead gates the read side of detections (rules + matches)
+	// so list endpoints require a permission consistent with the rest of
+	// the API instead of relying on authentication alone.
+	PermDetectionRead  Permission = "detection:read"
+	PermReportCreate   Permission = "report:create"
+	PermReportRead     Permission = "report:read"
+	PermAuditRead      Permission = "audit:read"
+	PermSettingsManage Permission = "settings:manage"
+	PermFeedManage     Permission = "feed:manage"
+	PermAlertRead      Permission = "alert:read"
+	PermAlertManage    Permission = "alert:manage"
 )
 
 // User is a human operator of the platform.

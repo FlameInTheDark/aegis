@@ -49,6 +49,8 @@ type DataPlane interface {
 	InsertEvent(ctx context.Context, agentID, typ string, payload map[string]any, occurred time.Time) error
 	PendingTasks(ctx context.Context, agentID string) ([]domain.AgentTask, error)
 	CompleteTask(ctx context.Context, id string, result map[string]any, errMsg string) error
+	// ApplySoftwareInventory persists agent-reported packages (F9).
+	ApplySoftwareInventory(ctx context.Context, agentID string, pkgs []domain.Software) (int, error)
 }
 
 // DeviceMetricsIngest persists device performance samples into the
@@ -62,6 +64,13 @@ type AgentsDataPlane struct{ S *agents.Service }
 
 func (a AgentsDataPlane) LinkInventory(ctx context.Context, agentID string, inv *domain.SystemInventory) error {
 	return a.S.LinkInventory(ctx, agentID, inv, nil, nil, nil)
+}
+
+// ApplySoftwareInventory persists agent-reported packages (F9): the gRPC
+// path used to keep packages in agent_events only, so the vulnerability
+// correlator never saw endpoint software.
+func (a AgentsDataPlane) ApplySoftwareInventory(ctx context.Context, agentID string, pkgs []domain.Software) (int, error) {
+	return a.S.ApplySoftwareInventory(ctx, agentID, pkgs)
 }
 func (a AgentsDataPlane) TouchSeen(ctx context.Context, id, version string) error {
 	return a.S.Repo.TouchSeen(ctx, id, version)
@@ -147,7 +156,7 @@ func (s *AgentServer) GetConfig(ctx context.Context, _ *agentv1.GetConfigRequest
 	return &agentv1.AgentConfig{
 		HeartbeatIntervalSecs: 30,
 		Capabilities:          []string{"basic_inventory", "software_inventory", "network_inventory", "security_posture"},
-		CollectionLevel:       "basic",
+		CollectionLevel:       "standard",
 		LocalScanEnabled:      false,
 		OfflineBufferMaxBytes: 16 << 20,
 		ConfigVersion:         "1",
@@ -197,18 +206,38 @@ func (s *AgentServer) SubmitSoftware(ctx context.Context, req *agentv1.SoftwareR
 	if err != nil {
 		return nil, err
 	}
+	pkgs := make([]domain.Software, 0, len(req.GetPackages()))
 	n := 0
 	for _, p := range req.GetPackages() {
 		if p.GetName() == "" {
 			continue
 		}
-		// Package inventory is stored as an agent event and applied to the
-		// linked asset by the worker correlation pass (keeps ingest cheap).
+		// The event stream keeps the raw push for audit/replay.
 		_ = s.Deps.Plane.InsertEvent(ctx, a.ID, "software", map[string]any{
 			"name": p.GetName(), "version": p.GetVersion(), "vendor": p.GetVendor(),
 			"ecosystem": p.GetEcosystem(), "purl": domain.PURL(p.GetEcosystem(), p.GetName(), p.GetVersion()),
 		}, time.Now().UTC())
+		src := p.GetSource()
+		if src == "" {
+			src = string(domain.SourceAgent)
+		}
+		pkgs = append(pkgs, domain.Software{
+			Name:      p.GetName(),
+			Version:   p.GetVersion(),
+			Vendor:    p.GetVendor(),
+			Ecosystem: p.GetEcosystem(),
+			PURL:      domain.PURL(p.GetEcosystem(), p.GetName(), p.GetVersion()),
+			Source:    src,
+		})
 		n++
+	}
+	// And the packages land in the actual software inventory (F9), not
+	// only in events — the correlator matches against software rows.
+	if applied, aerr := s.Deps.Plane.ApplySoftwareInventory(ctx, a.ID, pkgs); aerr != nil {
+		// Event rows survive the failure; the next 15-minute pass re-upserts.
+		_ = applied
+	} else {
+		n = applied
 	}
 	_ = s.Deps.Plane.TouchSeen(ctx, a.ID, "")
 	return ok(n), nil

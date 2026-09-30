@@ -30,6 +30,7 @@ type Service struct {
 	Orgs     *pg.OrgRepo
 	Services *pg.ServiceRepo
 	Scans    *pg.ScanRepo
+	Vulns    *pg.VulnRepo
 	Store    *platform.ObjectStore
 	Log      *slog.Logger
 	Details  DetailSource
@@ -42,6 +43,7 @@ const (
 	TypeInventory      = domain.ReportInventory
 	TypeScanComparison = domain.ReportScanDiff
 	TypeEventSummary   = domain.ReportSecurityEvts
+	TypeControlPosture = domain.ReportControlPosture
 )
 
 // RunJob executes one report job: gather → render → store.
@@ -132,6 +134,8 @@ type reportData struct {
 	Summary          map[string]any   `json:"summary"`
 	Findings         []domain.Finding `json:"findings"`
 	Assets           []domain.Asset   `json:"assets,omitempty"`
+	Controls         []ControlRow     `json:"controls,omitempty"`
+	CatalogVersion   string           `json:"catalog_version,omitempty"`
 	Scans            []domain.Scan    `json:"scans,omitempty"`
 	Recommendations  []string         `json:"recommendations,omitempty"`
 	AssetID          string           `json:"asset_id,omitempty"`
@@ -186,7 +190,7 @@ func (s *Service) gather(ctx context.Context, orgID string, def *domain.ReportDe
 	data.Summary["by_severity"] = bySev
 	data.Summary["kev"] = kev
 
-	if def.Type == TypeInventory || def.Type == TypeExecutive {
+	if def.Type == TypeInventory || def.Type == TypeExecutive || def.Type == TypeControlPosture {
 		assets, err := s.Assets.Inventory(ctx, orgID, def.SiteID)
 		if err != nil {
 			return nil, fmt.Errorf("load report inventory: %w", err)
@@ -209,6 +213,29 @@ func (s *Service) gather(ctx context.Context, orgID string, def *domain.ReportDe
 		if err == nil {
 			data.Scans = append(data.Scans, *scan)
 		}
+	}
+	if def.Type == TypeControlPosture {
+		cat, err := Controls()
+		if err != nil {
+			return nil, err
+		}
+		var kevSet map[string]bool
+		if s.Vulns != nil {
+			if ks, kerr := s.Vulns.KEVSet(ctx); kerr == nil {
+				kevSet = ks
+			}
+		}
+		for _, c := range cat.Controls {
+			data.Controls = append(data.Controls, matchControl(c, findings, kevSet))
+		}
+		data.CatalogVersion = cat.CatalogVersion
+		unagented := 0
+		for _, a := range data.Assets {
+			if !a.HasAgent {
+				unagented++
+			}
+		}
+		data.Summary["assets_without_endpoint_evidence"] = unagented
 	}
 	data.Recommendations = recommendations(data)
 	return data, nil
@@ -236,6 +263,8 @@ func titleFor(def *domain.ReportDefinition) string {
 		return "Site Detail Report"
 	case domain.ReportDeviceDetail:
 		return "Device Detail Report"
+	case TypeControlPosture:
+		return "Control Posture Report"
 	default:
 		return "Security Report"
 	}
@@ -279,7 +308,19 @@ func renderJSON(d *reportData) ([]byte, string, error) {
 func renderCSV(d *reportData) ([]byte, string, error) {
 	var b strings.Builder
 	w := csv.NewWriter(&b)
-	if d.Type == string(TypeInventory) {
+	if d.Type == string(TypeControlPosture) {
+		_ = w.Write([]string{"control_id", "source", "control", "observed_state", "matched_findings", "example_findings"})
+		for _, cr := range d.Controls {
+			examples := make([]string, 0, 3)
+			for i, f := range cr.Findings {
+				if i == 3 {
+					break
+				}
+				examples = append(examples, sanitizeCSV(f.Title))
+			}
+			_ = w.Write([]string{cr.ID, cr.Source, sanitizeCSV(cr.Name), cr.ObservedState, fmt.Sprint(cr.MatchedCount), strings.Join(examples, "; ")})
+		}
+	} else if d.Type == string(TypeInventory) {
 		_ = w.Write([]string{"asset_id", "hostname", "device_type", "os", "exposure", "criticality", "risk", "last_seen"})
 		for _, a := range d.Assets {
 			_ = w.Write([]string{a.ID, a.Hostname, string(a.DeviceType), a.OSName, string(a.Exposure), string(a.Criticality), fmt.Sprintf("%.0f", a.RiskScore), a.LastSeen.Format(time.RFC3339)})
@@ -352,6 +393,14 @@ const reportHTML = `<!doctype html>
 <table><tr><th>Risk</th><th>Severity</th><th>CVE</th><th>Title</th><th>Status</th><th>Asset</th></tr>
 {{range .Findings}}<tr><td>{{printf "%.0f" .RiskScore}}</td><td>{{.Severity}}</td><td>{{.CVEID}}</td><td>{{.Title}}</td><td>{{.Status}}</td><td><code>{{.AssetID}}</code></td></tr>{{end}}
 </table>{{end}}
+
+{{if .Controls}}
+<h2>Control mapping (catalog {{.CatalogVersion}})</h2>
+<table><tr><th>Control</th><th>Source</th><th>Observed state</th><th>Matched findings</th></tr>
+{{range .Controls}}<tr><td><b>{{.ID}}</b> {{.Name}}<br><span style="color:#6b7280">{{.Description}}</span></td><td>{{.Source}}</td><td>{{.ObservedState}}</td><td>{{.MatchedCount}}{{if .Findings}}<ul>{{range .Findings}}<li>{{.Title}} ({{.Severity}})</li>{{end}}</ul>{{end}}</td></tr>{{end}}
+</table>
+<p style="color:#6b7280;font-size:12px">{{index .Summary "assets_without_endpoint_evidence"}} of {{index .Summary "assets"}} assets in scope have no endpoint agent and therefore no first-hand evidence. "No findings observed" means no violations of this control were seen by Aegis — it does not assert the control is satisfied. This mapping is not a compliance certification.</p>
+{{end}}
 
 {{if .Assets}}
 <h2>Assets ({{len .Assets}})</h2>

@@ -653,7 +653,11 @@ func (r *FeedRepo) EnsureSource(ctx context.Context, name, license string) error
 
 func (r *FeedRepo) Sources(ctx context.Context) ([]domain.FeedSource, error) {
 	// last_error is nullable TEXT; COALESCE keeps the string scan NULL-safe.
-	q := r.db.Select("name, enabled, last_sync_at, last_status, records_ingested, records_new, records_updated, COALESCE(last_error,'') AS last_error, license").
+	// last_sync_age_seconds is computed at read time so operators can alert
+	// on "how stale is the NVD index" without doing date math client-side.
+	q := r.db.Select("name, enabled, last_sync_at, " +
+		"CASE WHEN last_sync_at IS NULL THEN NULL ELSE EXTRACT(EPOCH FROM (now() - last_sync_at)) END AS last_sync_age_seconds, " +
+		"last_status, records_ingested, records_new, records_updated, COALESCE(last_error,'') AS last_error, license").
 		From("feed_sources").OrderBy("name")
 	rows, err := r.db.Query(ctx, q)
 	if err != nil {
@@ -663,8 +667,8 @@ func (r *FeedRepo) Sources(ctx context.Context) ([]domain.FeedSource, error) {
 	var out []domain.FeedSource
 	for rows.Next() {
 		var f domain.FeedSource
-		if err := rows.Scan(&f.Name, &f.Enabled, &f.LastSyncAt, &f.LastStatus,
-			&f.RecordsIngest, &f.RecordsNew, &f.RecordsUpdated, &f.LastError, &f.License); err != nil {
+		if err := rows.Scan(&f.Name, &f.Enabled, &f.LastSyncAt, &f.LastSyncAge,
+			&f.LastStatus, &f.RecordsIngest, &f.RecordsNew, &f.RecordsUpdated, &f.LastError, &f.License); err != nil {
 			return nil, err
 		}
 		out = append(out, f)
@@ -775,6 +779,36 @@ func (r *FeedRepo) ClearRunning(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	return res.RowsAffected(), nil
+}
+
+// AcquireLease claims the cross-replica sync lease of one feed. Helm runs a
+// single feed-worker replica, but nothing prevented a second replica (or a
+// forgotten local dev worker pointed at the same database) from double-pulling
+// NVD. A lease is a timestamp, not a session: a crashed worker's lease simply
+// expires after the TTL, so recovery needs no cleanup pass. It returns false
+// when another owner still holds the feed.
+func (r *FeedRepo) AcquireLease(ctx context.Context, name, owner string, ttl time.Duration) (bool, error) {
+	now := time.Now().UTC()
+	q := r.db.Update("feed_sources").
+		Set("lease_owner", owner).
+		Set("lease_until", now.Add(ttl)).
+		Where(squirrel.Eq{"name": name}).
+		Where(squirrel.Lt{"lease_until": now})
+	res, err := r.db.Exec(ctx, q)
+	if err != nil {
+		return false, err
+	}
+	return res.RowsAffected() > 0, nil
+}
+
+// ReleaseLease frees the sync lease when the caller still owns it.
+func (r *FeedRepo) ReleaseLease(ctx context.Context, name, owner string) error {
+	q := r.db.Update("feed_sources").
+		Set("lease_owner", "").
+		Set("lease_until", time.Now().UTC().Add(-time.Second)).
+		Where(squirrel.Eq{"name": name, "lease_owner": owner})
+	_, err := r.db.Exec(ctx, q)
+	return err
 }
 
 // LastSyncAt exposes the previous successful sync time for incremental

@@ -45,6 +45,7 @@ type Finding struct {
 	Severity        Severity      `json:"severity"`
 	Status          FindingStatus `json:"status"`
 	Owner           string        `json:"owner,omitempty"`
+	DueDate         *time.Time    `json:"due_date,omitempty"` // investigation queue deadline (F2)
 	Notes           string        `json:"notes,omitempty"`
 	Remediation     string        `json:"remediation,omitempty"`
 	SuppressedUntil *time.Time    `json:"suppressed_until,omitempty"`
@@ -60,6 +61,13 @@ type Finding struct {
 	// inventory link yet (heuristic matches) or the row is gone.
 	Product string `json:"product,omitempty"`
 	Version string `json:"version,omitempty"`
+	// External tracker handoff (F6): where the remediation work lives.
+	// Written only by the handoff endpoints; refresh maps tracker closure
+	// back to the resolved status.
+	ExternalTracker  string     `json:"external_tracker,omitempty"` // github | jira
+	ExternalKey      string     `json:"external_key,omitempty"`
+	ExternalURL      string     `json:"external_url,omitempty"`
+	ExternalSyncedAt *time.Time `json:"external_synced_at,omitempty"`
 }
 
 // Evidence is a structured proof record backing a finding.

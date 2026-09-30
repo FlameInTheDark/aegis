@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Bell, ChevronRight, ChevronsUpDown, FilePlus2, Globe, Plus, Radar, Search } from "lucide-react";
+import { Bell, Building2, ChevronRight, ChevronsUpDown, FilePlus2, Globe, Link2, Plus, Radar, Search } from "lucide-react";
 
 import { timeAgo } from "@/lib/utils";
 import { Link, useRouter } from "@/lib/router";
@@ -110,6 +110,39 @@ function Breadcrumbs() {
   );
 }
 
+function OrganizationSwitcher() {
+  const { organizations, currentOrganizationId, switchOrganization } = useAuth();
+  if (organizations.length <= 1) return null;
+  const current = organizations.find((o) => o.id === currentOrganizationId);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" size="sm" className="gap-2 font-normal" title="Switch organization">
+          <Building2 className="size-3.5 text-muted-foreground" />
+          <span className="max-w-36 truncate">{current?.name ?? "Organization"}</span>
+          <ChevronsUpDown className="size-3 text-muted-foreground" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-64">
+        <DropdownMenuLabel>Organization</DropdownMenuLabel>
+        <DropdownMenuRadioGroup
+          value={currentOrganizationId ?? ""}
+          onValueChange={(id) => {
+            if (id !== currentOrganizationId) void switchOrganization(id);
+          }}
+        >
+          {organizations.map((o) => (
+            <DropdownMenuRadioItem key={o.id} value={o.id} className="justify-between">
+              <span className="truncate">{o.name}</span>
+              {o.role && <span className="text-xs capitalize text-muted-foreground">{o.role.replace("_", " ")}</span>}
+            </DropdownMenuRadioItem>
+          ))}
+        </DropdownMenuRadioGroup>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 function TopBar({ onOpenPalette }: { onOpenPalette: () => void }) {
   const { site, setSite } = useScope();
   const { navigate } = useRouter();
@@ -122,6 +155,8 @@ function TopBar({ onOpenPalette }: { onOpenPalette: () => void }) {
     <header className="flex h-14 shrink-0 items-center gap-3 border-b bg-background/80 pl-7 pr-4 backdrop-blur">
       <Breadcrumbs />
       <div className="flex-1" />
+
+      <OrganizationSwitcher />
 
       <button
         onClick={onOpenPalette}
@@ -226,6 +261,15 @@ function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenChange: (
           <CommandItem onSelect={() => go("/connections?create=agent")}>
             <Plus /> Connect endpoint
           </CommandItem>
+          <CommandItem
+            onSelect={() => {
+              onOpenChange(false);
+              void navigator.clipboard?.writeText(window.location.href);
+            }}
+          >
+            <Link2 /> Copy link to current view
+            <span className="ml-auto text-xs text-muted-foreground">includes filters</span>
+          </CommandItem>
         </CommandGroup>
         <CommandSeparator />
         <CommandGroup heading="Asset groups">
@@ -260,7 +304,7 @@ function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenChange: (
 /* ------------------------------------------------------------------ */
 export function AppShell({ children }: { children: React.ReactNode }) {
   useNotificationStream(); // org notification stream: toasts + badge invalidation
-  const { user } = useAuth();
+  const { user, currentOrganizationId } = useAuth();
   const [collapsed, setCollapsed] = React.useState(() => localStorage.getItem("aegis.sidebar") === "collapsed");
   const [paletteOpen, setPaletteOpen] = React.useState(false);
   const [site, setSite] = React.useState("all");
@@ -272,6 +316,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     localStorage.setItem("aegis.sidebar", collapsed ? "collapsed" : "expanded");
   }, [collapsed]);
+
+  // A site id belongs to its organization: after an org switch the stale
+  // site scope would filter every query against a site that may not exist
+  // in the new tenant. Reset to "all" whenever the active org changes.
+  const orgRef = React.useRef(currentOrganizationId);
+  React.useEffect(() => {
+    if (orgRef.current !== currentOrganizationId) {
+      orgRef.current = currentOrganizationId;
+      setSite("all");
+    }
+  }, [currentOrganizationId]);
 
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => {

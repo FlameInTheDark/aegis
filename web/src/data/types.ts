@@ -75,6 +75,9 @@ export interface Software {
   ecosystem?: string;
   purl?: string;
   source?: string;
+  /** F14: not_queried | queried_clean | queried_findings */
+  osvStatus?: string;
+  osvQueriedAt?: string;
 }
 
 export interface SeverityCounts {
@@ -207,9 +210,16 @@ export interface Finding {
   firstSeen: string;
   lastSeen: string;
   assignee?: string;
+  /** investigation deadline (F2 queue); overdue = due and still active */
+  dueDate?: string;
   /** inventory identity of the matched software/service (server-resolved) */
   product?: string;
   version?: string;
+  /** F6: external tracker handoff */
+  externalTracker?: string;
+  externalKey?: string;
+  externalUrl?: string;
+  externalSyncedAt?: string;
 }
 
 export type ScanState = "queued" | "running" | "completed" | "failed" | "cancelled";
@@ -250,6 +260,24 @@ export interface Scan {
 
 export type DetectionStatus = "new" | "investigating" | "contained" | "closed";
 
+/** Client view of a detection rule (F1 rules tab). */
+export interface DetectionRule {
+  id: string;
+  title: string;
+  identifier: string;
+  status: string;
+  description?: string;
+  author?: string;
+  event_type?: string;
+  level: string;
+  type: string;
+  window?: string;
+  enabled: boolean;
+  tags?: string[];
+  conditions?: { field: string; operator: string; values?: string[] }[];
+  threshold?: { count: number; distinct?: string };
+}
+
 export interface Detection {
   id: string;
   title: string;
@@ -260,6 +288,7 @@ export interface Detection {
   srcIp?: string;
   entity?: string;
   status: DetectionStatus;
+  assignee?: string;
   timestamp: string;
   description: string;
   count: number;

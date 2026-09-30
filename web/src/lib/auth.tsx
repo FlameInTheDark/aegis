@@ -34,9 +34,20 @@ export interface AuthUser {
   name: string
 }
 
+export interface AuthOrganization {
+  id: string
+  name: string
+  slug?: string
+  role?: string
+}
+
 interface AuthContextValue {
   status: AuthStatus
   user: AuthUser | null
+  organizations: AuthOrganization[]
+  currentOrganizationId: string | null
+  /** Rotate the access token into another membership (F3). */
+  switchOrganization: (organizationId: string) => Promise<void>
   login: (email: string, password: string) => Promise<void>
   logout: () => Promise<void>
 }
@@ -45,6 +56,8 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined)
 
 interface MeResponse {
   user: AuthUser
+  organizations?: AuthOrganization[]
+  current_organization_id?: string
 }
 
 // Network-failure retries during startup restore: short enough not to hang
@@ -55,6 +68,8 @@ const RESTORE_BACKOFF_MS = 1500
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>('initializing')
   const [user, setUser] = useState<AuthUser | null>(null)
+  const [organizations, setOrganizations] = useState<AuthOrganization[]>([])
+  const [currentOrganizationId, setCurrentOrganizationId] = useState<string | null>(null)
   const queryClient = useQueryClient()
   const restoreRef = useRef<(() => Promise<void>) | undefined>(undefined)
 
@@ -71,6 +86,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       try {
         const me = await api.get<MeResponse>('/auth/me')
         setUser(me.user)
+        setOrganizations(me.organizations ?? [])
+        setCurrentOrganizationId(me.current_organization_id ?? null)
         setStatus('authenticated')
         return
       } catch {
@@ -103,6 +120,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     onSessionLost(() => {
       setUser(null)
+      setOrganizations([])
+      setCurrentOrganizationId(null)
       setStatus('unauthenticated')
       // Authenticated data cached by react-query must not outlive the
       // session it was fetched under.
@@ -121,6 +140,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (type === 'logout') {
         clearAccessToken()
         setUser(null)
+        setOrganizations([])
+        setCurrentOrganizationId(null)
         setStatus('unauthenticated')
         queryClient.clear()
       } else if (type === 'login') {
@@ -139,6 +160,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const res = await api.login(email, password)
       setAccessToken(res.access_token)
       setUser(res.user)
+      try {
+        // Memberships ride /auth/me; the switcher hides when there is only
+        // one membership, so a failure here must not break login.
+        const me = await api.get<MeResponse>('/auth/me')
+        setOrganizations(me.organizations ?? [])
+        setCurrentOrganizationId(me.current_organization_id ?? null)
+      } catch {
+        setOrganizations([])
+        setCurrentOrganizationId(null)
+      }
       setStatus('authenticated')
       broadcast({ type: 'login' })
     },
@@ -151,12 +182,38 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await api.logout()
     ws.disconnect() // drop the streaming socket with the session
     setUser(null)
+    setOrganizations([])
+    setCurrentOrganizationId(null)
     setStatus('unauthenticated')
     queryClient.clear()
     broadcast({ type: 'logout' })
   }, [queryClient])
 
-  return <AuthContext.Provider value={{ status, user, login, logout }}>{children}</AuthContext.Provider>
+  // F3 organization switcher: the backend re-points the session family at
+  // the chosen membership and mints a fresh access token for it. Every
+  // cached query is org-scoped, so the cache MUST be dropped before any
+  // page refetches — otherwise data from the previous tenant could render.
+  const switchOrganization = useCallback(
+    async (organizationId: string) => {
+      const res = await api.post<{ access_token: string; expires_in: number; user: { id: string; email: string; name: string } }>(
+        '/auth/switch-organization',
+        { organization_id: organizationId },
+      )
+      setAccessToken(res.access_token)
+      queryClient.clear()
+      const me = await api.get<MeResponse>('/auth/me')
+      setUser(me.user)
+      setOrganizations(me.organizations ?? [])
+      setCurrentOrganizationId(me.current_organization_id ?? organizationId)
+    },
+    [queryClient],
+  )
+
+  return (
+    <AuthContext.Provider value={{ status, user, organizations, currentOrganizationId, switchOrganization, login, logout }}>
+      {children}
+    </AuthContext.Provider>
+  )
 }
 
 function broadcast(message: { type: 'login' | 'logout' }) {

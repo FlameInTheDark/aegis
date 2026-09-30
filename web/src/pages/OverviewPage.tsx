@@ -1,19 +1,5 @@
 import * as React from "react";
-import {
-  Area,
-  AreaChart,
-  Bar,
-  BarChart,
-  CartesianGrid,
-  Cell,
-  Pie,
-  PieChart,
-  ResponsiveContainer,
-  Tooltip as RTooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
-import { ArrowRight, Bell, Bug, Cpu, DoorOpen, Flame, Layers, RefreshCw, ShieldAlert, Siren, Radar } from "lucide-react";
+import { ArrowRight, Bell, Bug, CalendarClock, Cpu, DoorOpen, Flame, Layers, ListTree, RefreshCw, ShieldAlert, Siren, Radar } from "lucide-react";
 
 import { timeAgo } from "@/lib/utils";
 import { Link, useRouter } from "@/lib/router";
@@ -28,23 +14,20 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { EmptyState, KpiTile, RiskMeter, SeverityBadge, severityMeta, StateBadge } from "@/components/shared";
 import type { Severity } from "@/data/types";
+import { Chart } from "@/components/charts/Chart";
 
-/* Recharts tooltip in our visual language */
-export function ChartTooltip({ active, payload, label }: { active?: boolean; payload?: { name: string; value: number; color?: string }[]; label?: string }) {
-  if (!active || !payload?.length) return null;
-  return (
-    <div className="rounded-md border bg-popover px-3 py-2 text-xs shadow-lg">
-      <div className="mb-1 font-medium text-foreground">{label}</div>
-      {payload.map((p) => (
-        <div key={p.name} className="flex items-center justify-between gap-4">
-          <span className="flex items-center gap-1.5 capitalize text-muted-foreground">
-            <span className="size-2 rounded-sm" style={{ background: p.color }} /> {p.name}
-          </span>
-          <span className="tabular font-medium text-foreground">{p.value}</span>
-        </div>
-      ))}
-    </div>
-  );
+// zrender (ECharts' canvas renderer) does not parse oklch() colors, so the
+// chart palette pins the SAME hex values the shared Chart theme maps — one
+// visual language, one renderable color format.
+function severityHex(s: "critical" | "high" | "medium" | "low" | "info" | string): string {
+  const map: Record<string, string> = {
+    critical: "#F87171",
+    high: "#FB923C",
+    medium: "#FBBF24",
+    low: "#60A5FA",
+    info: "#6B7280",
+  };
+  return map[s] ?? "#6B7280";
 }
 
 export function OverviewPage() {
@@ -69,7 +52,7 @@ export function OverviewPage() {
   };
   const runningScans = (scansQ.data?.items ?? []).filter((s) => s.state === "running");
 
-  const donut = (["critical", "high", "medium", "low"] as const).map((k) => ({ name: k, value: totals[k], color: severityMeta[k].hex }));
+  const donut = (["critical", "high", "medium", "low"] as const).map((k) => ({ name: k, value: totals[k], color: severityHex(k) }));
   const donutTotal = donut.reduce((n, d) => n + d.value, 0);
 
   const exposed = [...assets].sort((a, b) => b.risk - a.risk).slice(0, 6);
@@ -144,7 +127,7 @@ export function OverviewPage() {
       </div>
 
       {/* KPIs */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
         <KpiTile label="Assets" value={metrics.data?.assets ?? "—"} hint="listening services" icon={Layers} onClick={() => navigate("/assets")} tone="primary" />
         <KpiTile label="Open ports" value={metrics.data?.open_ports ?? "—"} hint="listening services" icon={DoorOpen} onClick={() => navigate("/assets")} />
         <KpiTile label="Vulnerabilities" value={metrics.data?.vulnerabilities ?? "—"} hint="open findings" icon={Bug} onClick={() => navigate("/vulnerabilities")} />
@@ -152,6 +135,22 @@ export function OverviewPage() {
         <KpiTile label="KEV" value={metrics.data?.kev ?? "—"} tone={metrics.data?.kev ? "critical" : "default"} hint="known exploited" icon={Siren} onClick={() => navigate("/vulnerabilities?kev=1")} />
         <KpiTile label="High-risk assets" value={metrics.data?.high_risk_assets ?? "—"} tone={metrics.data?.high_risk_assets ? "high" : "default"} hint="risk ≥ 70" icon={ShieldAlert} onClick={() => navigate("/assets?sort=risk")} />
         <KpiTile label="Active alerts" value={metrics.data?.active_alerts ?? "—"} tone={metrics.data?.active_alerts ? "high" : "default"} hint="detection matches" icon={Bell} onClick={() => navigate("/detections")} />
+        <KpiTile
+          label="Overdue"
+          value={metrics.data?.overdue_findings ?? "—"}
+          tone={metrics.data?.overdue_findings ? "critical" : "default"}
+          hint="past due date"
+          icon={CalendarClock}
+          onClick={() => navigate("/findings")}
+        />
+        <KpiTile
+          label="Changes 7d"
+          value={metrics.data?.changes_7d ?? "—"}
+          tone={metrics.data?.changes_7d ? "high" : "default"}
+          hint="scan changes this week"
+          icon={ListTree}
+          onClick={() => navigate("/changes")}
+        />
       </div>
 
       {/* Row 2: trend + distribution */}
@@ -172,21 +171,31 @@ export function OverviewPage() {
             {riskTrend.length === 0 ? (
               <EmptyState compact icon={Radar} title="No risk history yet" description="Risk history builds up as findings are correlated over time." />
             ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={riskTrend} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="riskFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="oklch(0.66 0.17 275)" stopOpacity={0.35} />
-                      <stop offset="100%" stopColor="oklch(0.66 0.17 275)" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid vertical={false} strokeDasharray="3 3" />
-                  <XAxis dataKey="date" tickLine={false} axisLine={false} interval={4} dy={6} />
-                  <YAxis tickLine={false} axisLine={false} width={40} />
-                  <RTooltip content={<ChartTooltip />} />
-                  <Area type="monotone" dataKey="risk" stroke="oklch(0.66 0.17 275)" strokeWidth={2} fill="url(#riskFill)" />
-                </AreaChart>
-              </ResponsiveContainer>
+              <Chart
+                option={{
+                  grid: { left: 40, right: 12, top: 16, bottom: 28 },
+                  xAxis: {
+                    type: "category",
+                    boundaryGap: false,
+                    data: riskTrend.map((p) => p.date),
+                    axisLine: { lineStyle: { color: "rgba(255,255,255,0.1)" } },
+                    axisTick: { show: false },
+                    axisLabel: { interval: 4, color: "#8A8F98", fontSize: 10, margin: 12 },
+                  },
+                  yAxis: { type: "value", axisLabel: { color: "#8A8F98", fontSize: 10 }, splitLine: { lineStyle: { color: "rgba(255,255,255,0.05)" } } },
+                  series: [
+                    {
+                      name: "Risk",
+                      type: "line",
+                      data: riskTrend.map((p) => p.risk),
+                      smooth: true,
+                      symbol: "none",
+                      lineStyle: { color: "#5E6AD2", width: 2 },
+                      areaStyle: { color: "rgba(94,106,210,0.18)" },
+                    },
+                  ],
+                }}
+              />
             )}
           </CardContent>
         </Card>
@@ -198,19 +207,23 @@ export function OverviewPage() {
           </CardHeader>
           <CardContent className="flex items-center gap-4">
             <div className="relative h-40 w-40 shrink-0">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie data={donut} dataKey="value" innerRadius={52} outerRadius={72} paddingAngle={2} stroke="none" startAngle={90} endAngle={-270}>
-                    {donut.map((d) => (
-                      <Cell key={d.name} fill={d.color} />
-                    ))}
-                  </Pie>
-                  {/* wrapperStyle lifts the tooltip above the absolutely
-                      positioned center count, which would otherwise paint
-                      over it (same stacking context, later in DOM order). */}
-                  <RTooltip content={<ChartTooltip />} wrapperStyle={{ zIndex: 30 }} />
-                </PieChart>
-              </ResponsiveContainer>
+              <Chart
+                height={160}
+                option={{
+                  tooltip: { trigger: "item" },
+                  series: [
+                    {
+                      type: "pie",
+                      radius: ["58%", "80%"],
+                      center: ["50%", "50%"],
+                      padAngle: 2,
+                      itemStyle: { borderWidth: 0 },
+                      label: { show: false },
+                      data: donut.map((d) => ({ name: d.name, value: d.value, itemStyle: { color: severityHex(d.name) } })),
+                    },
+                  ],
+                }}
+              />
               <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
                 <span className="tabular text-2xl font-semibold">{donutTotal}</span>
                 <span className="text-[10px] uppercase tracking-wider text-muted-foreground">findings</span>
@@ -251,18 +264,35 @@ export function OverviewPage() {
             {eventVolume.length === 0 ? (
               <EmptyState compact icon={Bell} title="No event volume recorded" description="Sensor events require a running ClickHouse backend and active sensors." />
             ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={eventVolume} margin={{ top: 4, right: 4, left: -20, bottom: 0 }} barSize={22}>
-                  <CartesianGrid vertical={false} strokeDasharray="3 3" />
-                  <XAxis dataKey="day" tickLine={false} axisLine={false} dy={6} />
-                  <YAxis tickLine={false} axisLine={false} width={40} />
-                  <RTooltip content={<ChartTooltip />} />
-                  <Bar dataKey="agent" stackId="a" fill="oklch(0.35 0.03 262)" radius={[0, 0, 2, 2]} />
-                  <Bar dataKey="scans" stackId="a" fill="oklch(0.66 0.17 275)" />
-                  <Bar dataKey="auth" stackId="a" fill="oklch(0.74 0.12 230)" />
-                  <Bar dataKey="detections" stackId="a" fill="oklch(0.64 0.22 22)" radius={[2, 2, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
+              <Chart
+                height={220}
+                option={{
+                  grid: { left: 40, right: 12, top: 16, bottom: 28 },
+                  xAxis: {
+                    type: "category",
+                    data: eventVolume.map((p) => p.day),
+                    axisLine: { lineStyle: { color: "rgba(255,255,255,0.1)" } },
+                    axisTick: { show: false },
+                    axisLabel: { color: "#8A8F98", fontSize: 10, margin: 12 },
+                  },
+                  yAxis: { type: "value", axisLabel: { color: "#8A8F98", fontSize: 10 }, splitLine: { lineStyle: { color: "rgba(255,255,255,0.05)" } } },
+                  series: (
+                    [
+                      { key: "agent", name: "agent", color: "#3F4254" },
+                      { key: "scans", name: "scans", color: "#5E6AD2" },
+                      { key: "auth", name: "auth", color: "#8FA8D9" },
+                      { key: "detections", name: "detections", color: "#D2504B" },
+                    ] as const
+                  ).map((s) => ({
+                    name: s.name,
+                    type: "bar" as const,
+                    stack: "events",
+                    barWidth: 22,
+                    itemStyle: { color: s.color },
+                    data: eventVolume.map((p) => p[s.key]),
+                  })),
+                }}
+              />
             )}
           </CardContent>
         </Card>

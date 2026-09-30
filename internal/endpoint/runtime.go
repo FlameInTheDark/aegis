@@ -322,7 +322,18 @@ func (r *Runtime) submitAll(ctx context.Context) {
 	if err := r.Client.SubmitInventory(ctx, inv); err != nil {
 		r.Log.Warn("inventory submit failed", "err", err)
 	}
-	if pkgs := r.Collector.SoftwarePackages(); len(pkgs) > 0 {
+	// Phase 4.12: collection levels gate what leaves the device. basic =
+	// identity inventory only; standard adds software, network state and
+	// posture (the historical always-on set); full adds container
+	// workloads (F9). Absent packages are honest absence, not defaults.
+	level := r.Cfg.CollectionLevel
+	if level == "" {
+		level = "standard"
+	}
+	submitSoftware := func(pkgs []agentv1.SoftwareReport_Package) {
+		if len(pkgs) == 0 {
+			return
+		}
 		if len(pkgs) > 2000 {
 			pkgs = pkgs[:2000]
 		}
@@ -334,14 +345,23 @@ func (r *Runtime) submitAll(ctx context.Context) {
 			r.Log.Warn("software submit failed", "err", err)
 		}
 	}
-	if err := r.Client.SubmitNetworkState(ctx, &agentv1.NetworkStateReport{
-		AgentId: r.Cfg.AgentID, ListeningSockets: toPtrSockets(r.Collector.ListeningSockets()),
-		DefaultGateways: r.Collector.DefaultGateways(), DnsServers: r.Collector.DNSServers(),
-	}); err != nil {
-		r.Log.Warn("network submit failed", "err", err)
+	if level != "basic" {
+		submitSoftware(r.Collector.SoftwarePackages())
+		if err := r.Client.SubmitNetworkState(ctx, &agentv1.NetworkStateReport{
+			AgentId: r.Cfg.AgentID, ListeningSockets: toPtrSockets(r.Collector.ListeningSockets()),
+			DefaultGateways: r.Collector.DefaultGateways(), DnsServers: r.Collector.DNSServers(),
+		}); err != nil {
+			r.Log.Warn("network submit failed", "err", err)
+		}
+		if err := r.Client.SubmitSecurityPosture(ctx, r.Collector.SecurityPosture()); err != nil {
+			r.Log.Warn("posture submit failed", "err", err)
+		}
 	}
-	if err := r.Client.SubmitSecurityPosture(ctx, r.Collector.SecurityPosture()); err != nil {
-		r.Log.Warn("posture submit failed", "err", err)
+	if level == "full" {
+		if containers := r.Collector.Containers(); len(containers) > 0 {
+			r.Log.Info("container workloads collected", "count", len(containers))
+			submitSoftware(containers)
+		}
 	}
 }
 
